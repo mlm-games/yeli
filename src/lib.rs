@@ -617,10 +617,10 @@ impl World {
         let mut extra_files: Vec<PathBuf> = Vec::new();
         for s in &subjects {
             for obj in graph.objects_for_subject_predicate(s.as_ref(), nn(uris::RDFS_SEE_ALSO)) {
-                if let TermRef::NamedNode(n) = obj {
-                    if let Some(p) = file_uri_to_path(n.as_str()) {
-                        extra_files.push(p);
-                    }
+                if let TermRef::NamedNode(n) = obj
+                    && let Some(p) = file_uri_to_path(n.as_str())
+                {
+                    extra_files.push(p);
                 }
             }
         }
@@ -1167,10 +1167,10 @@ impl WorkerRuntime {
     }
 
     fn end_run(&self, handle: lv2_sys::LV2_Handle) {
-        if let Ok(iface) = self.shared.interface.lock() {
-            if let Some(end) = iface.end_run {
-                unsafe { end(handle) };
-            }
+        if let Ok(iface) = self.shared.interface.lock()
+            && let Some(end) = iface.end_run
+        {
+            unsafe { end(handle) };
         }
     }
 
@@ -1339,7 +1339,7 @@ impl AtomSequence {
     pub fn new(body_capacity: usize, seq_urid: u32, chunk_urid: u32, input: bool) -> Self {
         let total = SEQ_HEADER + body_capacity;
         let mut s = AtomSequence {
-            buf: vec![0u64; (total + 7) / 8],
+            buf: vec![0u64; total.div_ceil(8)],
             body_capacity,
             events_bytes: 0,
             seq_urid,
@@ -1872,10 +1872,10 @@ impl Instance {
     pub fn push_midi(&mut self, frame: i64, message: &[u8]) -> Result<(), Error> {
         let midi = self.midi_urid;
         for (port, buf) in self.ports.iter().zip(self.buffers.iter_mut()) {
-            if port.direction == PortDirection::Input {
-                if let PortBuffer::AtomIn(seq) = buf {
-                    return seq.push_event(frame, midi, message);
-                }
+            if port.direction == PortDirection::Input
+                && let PortBuffer::AtomIn(seq) = buf
+            {
+                return seq.push_event(frame, midi, message);
             }
         }
         Err(Error::UnsupportedPort(
@@ -1904,11 +1904,11 @@ impl Instance {
     /// Set a control input by symbol name.
     pub fn set_control(&mut self, symbol: &str, value: f32) -> bool {
         for (port, buf) in self.ports.iter().zip(self.buffers.iter_mut()) {
-            if port.symbol == symbol {
-                if let PortBuffer::Control(v) = buf {
-                    **v = value;
-                    return true;
-                }
+            if port.symbol == symbol
+                && let PortBuffer::Control(v) = buf
+            {
+                **v = value;
+                return true;
             }
         }
         false
@@ -1917,10 +1917,10 @@ impl Instance {
     /// Read a control port value by symbol name.
     pub fn control(&self, symbol: &str) -> Option<f32> {
         for (port, buf) in self.ports.iter().zip(self.buffers.iter()) {
-            if port.symbol == symbol {
-                if let PortBuffer::Control(v) = buf {
-                    return Some(**v);
-                }
+            if port.symbol == symbol
+                && let PortBuffer::Control(v) = buf
+            {
+                return Some(**v);
             }
         }
         None
@@ -2027,13 +2027,13 @@ impl Instance {
     pub fn atom_output(&self, nth: usize) -> Option<&AtomSequence> {
         let mut n = 0;
         for (port, buf) in self.ports.iter().zip(self.buffers.iter()) {
-            if port.direction == PortDirection::Output {
-                if let PortBuffer::AtomOut(seq) = buf {
-                    if n == nth {
-                        return Some(seq);
-                    }
-                    n += 1;
+            if port.direction == PortDirection::Output
+                && let PortBuffer::AtomOut(seq) = buf
+            {
+                if n == nth {
+                    return Some(seq);
                 }
+                n += 1;
             }
         }
         None
@@ -2121,7 +2121,7 @@ impl Instance {
         let sample_rate_val = &sample_rate_f32 as *const f32 as *mut c_void;
         let atom_float = self._urid.map(uris::ATOM_FLOAT);
         let sr_urid = self._urid.map(uris::PARAM_SAMPLE_RATE);
-        let ui_options = vec![
+        let ui_options = [
             lv2_sys::LV2_Options_Option {
                 context: 0,
                 subject: 0,
@@ -2289,10 +2289,10 @@ impl Drop for Instance {
             worker.shutdown();
         }
         unsafe {
-            if self.active {
-                if let Some(deactivate) = (*self.descriptor).deactivate {
-                    deactivate(self.handle);
-                }
+            if self.active
+                && let Some(deactivate) = (*self.descriptor).deactivate
+            {
+                deactivate(self.handle);
             }
             if let Some(cleanup) = (*self.descriptor).cleanup {
                 cleanup(self.handle);
