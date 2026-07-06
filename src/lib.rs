@@ -16,7 +16,9 @@ use std::ffi::{CStr, CString, c_void};
 use std::fmt;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 
 use oxrdf::{Graph, NamedNode, NamedNodeRef, NamedOrBlankNodeRef, TermRef};
 use oxttl::TurtleParser;
@@ -66,14 +68,19 @@ pub mod uris {
     pub const UI_X11_UI: &str = "http://lv2plug.in/ns/extensions/ui#X11UI";
     pub const UI_GTK_UI: &str = "http://lv2plug.in/ns/extensions/ui#GtkUI";
     pub const UI_GTK3_UI: &str = "http://lv2plug.in/ns/extensions/ui#Gtk3UI";
+
+    pub const WORKER_SCHEDULE: &str = "http://lv2plug.in/ns/ext/worker#schedule";
+    pub const WORKER_INTERFACE: &str = "http://lv2plug.in/ns/ext/worker#interface";
 }
 
 /// Features this host can supply to plugins.
-pub const SUPPORTED_FEATURES: [&str; 4] = [
+pub const SUPPORTED_FEATURES: [&str; 6] = [
     uris::URID_MAP,
     uris::URID_UNMAP,
     uris::OPTIONS_OPTIONS,
     uris::BUF_BOUNDED,
+    uris::WORKER_SCHEDULE,
+    uris::WORKER_INTERFACE,
 ];
 
 /// Capacity (bytes) of atom sequence port buffers.
@@ -671,7 +678,7 @@ impl World {
         let min_block = features.min_block_length();
 
         // 3. Build the C feature array (heap-pinned; must outlive the instance).
-        let c_features = build_c_features(
+        let mut c_features = build_c_features(
             &self.urid,
             min_block as i32,
             max_block as i32,
@@ -720,6 +727,24 @@ impl World {
         if handle.is_null() {
             return Err(Error::Instantiation(plugin.uri.clone()));
         }
+
+        // 5a. Check for worker interface extension and start worker thread.
+        let worker_runtime = if let Some(ext_data) = unsafe { (*descriptor).extension_data } {
+            let worker_iface_uri =
+                CString::new(uris::WORKER_INTERFACE).expect("valid CString");
+            let iface_ptr = unsafe { ext_data(worker_iface_uri.as_ptr()) };
+            if !iface_ptr.is_null() {
+                let iface = unsafe { &*(iface_ptr as *const lv2_sys::LV2_Worker_Interface) };
+                let runtime = WorkerRuntime::new(iface, handle);
+                let shared_ptr = Arc::as_ptr(&runtime.shared) as *mut std::ffi::c_void;
+                c_features.schedule.handle = shared_ptr;
+                Some(runtime)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // 6. Allocate and connect port buffers.
         let seq_urid = self.urid.map(uris::ATOM_SEQUENCE);
@@ -796,6 +821,7 @@ impl World {
             ports: plugin.ports.clone(),
             buffers,
             _features: c_features,
+            worker_runtime,
             _urid: self.urid.clone(),
             midi_urid,
             max_block,
@@ -976,10 +1002,193 @@ fn build_plugin(graph: &Graph, subject: &NamedNode, bundle: &Path) -> Result<Plu
     })
 }
 
+/// Shared state accessed by the schedule callback (from the audio thread)
+/// and the worker thread.
+struct WorkerShared {
+    pending: Mutex<Vec<Vec<u8>>>,
+    completed: Mutex<Vec<(u32, Vec<u8>)>>,
+    waker: Condvar,
+    interface: Mutex<lv2_sys::LV2_Worker_Interface>,
+    handle: Mutex<lv2_sys::LV2_Handle>,
+    running: AtomicBool,
+}
+
+// Raw pointers inside Mutex are safe to send/sync because we only
+// access them under the lock.
+unsafe impl Send for WorkerShared {}
+unsafe impl Sync for WorkerShared {}
+
+/// The `handle` parameter of `respond` is the `LV2_Worker_Respond_Handle` that
+/// was passed as the third argument to `work()`.  Plugins MUST pass this
+/// handle back when calling `respond`, so we can recover the `WorkerShared`.
+unsafe extern "C" fn worker_respond_cb(
+    handle: lv2_sys::LV2_Worker_Respond_Handle,
+    size: u32,
+    data: *const std::ffi::c_void,
+) -> lv2_sys::LV2_Worker_Status {
+    if handle.is_null() || data.is_null() {
+        return lv2_sys::LV2_Worker_Status_LV2_WORKER_ERR_UNKNOWN;
+    }
+    let shared = unsafe { &*(handle as *const WorkerShared) };
+    let slice = unsafe { std::slice::from_raw_parts(data as *const u8, size as usize) };
+    if let Ok(mut completed) = shared.completed.lock() {
+        completed.push((size, slice.to_vec()));
+        lv2_sys::LV2_Worker_Status_LV2_WORKER_SUCCESS
+    } else {
+        lv2_sys::LV2_Worker_Status_LV2_WORKER_ERR_UNKNOWN
+    }
+}
+
+unsafe extern "C" fn worker_schedule_cb(
+    handle: lv2_sys::LV2_Worker_Schedule_Handle,
+    size: u32,
+    data: *const std::ffi::c_void,
+) -> lv2_sys::LV2_Worker_Status {
+    if handle.is_null() || data.is_null() {
+        return lv2_sys::LV2_Worker_Status_LV2_WORKER_ERR_UNKNOWN;
+    }
+    let shared = unsafe { &*(handle as *const WorkerShared) };
+    let slice = unsafe { std::slice::from_raw_parts(data as *const u8, size as usize) };
+    if let Ok(mut pending) = shared.pending.lock() {
+        pending.push(slice.to_vec());
+        shared.waker.notify_one();
+        lv2_sys::LV2_Worker_Status_LV2_WORKER_SUCCESS
+    } else {
+        lv2_sys::LV2_Worker_Status_LV2_WORKER_ERR_UNKNOWN
+    }
+}
+
+/// Background worker that processes plugin work requests.
+struct WorkerRuntime {
+    shared: Arc<WorkerShared>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl WorkerRuntime {
+    fn new(
+        iface: &lv2_sys::LV2_Worker_Interface,
+        plugin_handle: lv2_sys::LV2_Handle,
+    ) -> Self {
+        let shared = Arc::new(WorkerShared {
+            pending: Mutex::new(Vec::new()),
+            completed: Mutex::new(Vec::new()),
+            waker: Condvar::new(),
+            interface: Mutex::new(*iface),
+            handle: Mutex::new(plugin_handle),
+            running: AtomicBool::new(true),
+        });
+
+        let thread_shared = shared.clone();
+        let thread = thread::Builder::new()
+            .name("lv2-worker".into())
+            .spawn(move || Self::thread_main(thread_shared))
+            .ok();
+
+        Self { shared, thread }
+    }
+
+    fn thread_main(shared: Arc<WorkerShared>) {
+        let mut pending_owned = Vec::new();
+        loop {
+            let mut pending = match shared.pending.lock() {
+                Ok(g) => {
+                    if g.is_empty() {
+                        match shared.waker.wait(g) {
+                            Ok(g) => g,
+                            Err(_) => break,
+                        }
+                    } else {
+                        g
+                    }
+                }
+                Err(_) => break,
+            };
+
+            if !shared.running.load(Ordering::Acquire) {
+                break;
+            }
+
+            pending_owned.clear();
+            std::mem::swap(&mut *pending, &mut pending_owned);
+            drop(pending);
+
+            let iface = match shared.interface.lock() {
+                Ok(g) => *g,
+                Err(_) => break,
+            };
+            let plugin_handle = match shared.handle.lock() {
+                Ok(g) => *g,
+                Err(_) => break,
+            };
+
+            // The respond handle is a pointer to WorkerShared so the
+            // respond callback can recover it without a thread-local.
+            let respond_handle = Arc::as_ptr(&shared) as *const WorkerShared as *mut std::ffi::c_void;
+
+            for data in &pending_owned {
+                if let Some(work) = iface.work {
+                    unsafe {
+                        work(
+                            plugin_handle,
+                            Some(worker_respond_cb),
+                            respond_handle,
+                            data.len() as u32,
+                            data.as_ptr() as *const std::ffi::c_void,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Drain completed responses and deliver to the plugin via work_response().
+    fn deliver_responses(&self, handle: lv2_sys::LV2_Handle) {
+        let iface = match self.shared.interface.lock() {
+            Ok(g) => *g,
+            Err(_) => return,
+        };
+        let completed = match self.shared.completed.lock() {
+            Ok(mut g) => {
+                let mut ready = Vec::new();
+                std::mem::swap(&mut *g, &mut ready);
+                ready
+            }
+            Err(_) => return,
+        };
+        for (size, data) in &completed {
+            if let Some(rsp) = iface.work_response {
+                unsafe {
+                    rsp(handle, *size, data.as_ptr() as *const std::ffi::c_void);
+                }
+            }
+        }
+    }
+
+    fn end_run(&self, handle: lv2_sys::LV2_Handle) {
+        if let Ok(iface) = self.shared.interface.lock() {
+            if let Some(end) = iface.end_run {
+                unsafe { end(handle) };
+            }
+        }
+    }
+
+    fn shutdown(&mut self) {
+        self.shared.running.store(false, Ordering::Release);
+        self.shared.waker.notify_all();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+unsafe impl Send for WorkerRuntime {}
+unsafe impl Sync for WorkerRuntime {}
+
 struct InstanceFeatures {
     _urid: Arc<UridMap>,
     map: lv2_sys::LV2_URID_Map,
     unmap: lv2_sys::LV2_URID_Unmap,
+    schedule: lv2_sys::LV2_Worker_Schedule,
     min_block: i32,
     max_block: i32,
     nominal_block: i32,
@@ -1016,6 +1225,10 @@ fn build_c_features(
         unmap: lv2_sys::LV2_URID_Unmap {
             handle: std::ptr::null_mut(),
             unmap: Some(urid_unmap_cb),
+        },
+        schedule: lv2_sys::LV2_Worker_Schedule {
+            handle: std::ptr::null_mut(),
+            schedule_work: Some(worker_schedule_cb),
         },
         min_block,
         max_block,
@@ -1056,10 +1269,12 @@ fn build_c_features(
         CString::new(uris::URID_UNMAP).unwrap(),
         CString::new(uris::OPTIONS_OPTIONS).unwrap(),
         CString::new(uris::BUF_BOUNDED).unwrap(),
+        CString::new(uris::WORKER_SCHEDULE).unwrap(),
     ];
     let p_map = &mut f.map as *mut lv2_sys::LV2_URID_Map as *mut c_void;
     let p_unmap = &mut f.unmap as *mut lv2_sys::LV2_URID_Unmap as *mut c_void;
     let p_opts = f.options.as_ptr() as *mut c_void;
+    let p_sched = &mut f.schedule as *mut lv2_sys::LV2_Worker_Schedule as *mut c_void;
     f.features = vec![
         lv2_sys::LV2_Feature {
             URI: f.uris_c[0].as_ptr(),
@@ -1076,6 +1291,10 @@ fn build_c_features(
         lv2_sys::LV2_Feature {
             URI: f.uris_c[3].as_ptr(),
             data: std::ptr::null_mut(),
+        },
+        lv2_sys::LV2_Feature {
+            URI: f.uris_c[4].as_ptr(),
+            data: p_sched,
         },
     ];
     f.feature_ptrs = f
@@ -1376,6 +1595,7 @@ pub struct Instance {
     ports: Vec<Port>,
     buffers: Vec<PortBuffer>,
     _features: Box<InstanceFeatures>,
+    worker_runtime: Option<WorkerRuntime>,
     _urid: Arc<UridMap>,
     midi_urid: u32,
     min_block: usize,
@@ -1484,9 +1704,15 @@ impl Instance {
                 seq.prepare_output();
             }
         }
+        if let Some(ref worker) = self.worker_runtime {
+            worker.deliver_responses(self.handle);
+        }
         let run = unsafe { (*self.descriptor).run }
             .ok_or_else(|| Error::Instantiation("descriptor has no run()".into()))?;
         unsafe { run(self.handle, frames as u32) };
+        if let Some(ref worker) = self.worker_runtime {
+            worker.end_run(self.handle);
+        }
         for buf in &mut self.buffers {
             if let PortBuffer::AtomIn(seq) = buf {
                 seq.clear();
@@ -1598,9 +1824,15 @@ impl Instance {
             self.activate();
         }
 
+        if let Some(ref worker) = self.worker_runtime {
+            worker.deliver_responses(self.handle);
+        }
         let run = unsafe { (*self.descriptor).run }
             .ok_or_else(|| Error::Instantiation("descriptor has no run()".into()))?;
         unsafe { run(self.handle, samples as u32) };
+        if let Some(ref worker) = self.worker_runtime {
+            worker.end_run(self.handle);
+        }
 
         Ok(())
     }
@@ -1866,6 +2098,10 @@ impl Instance {
 
 impl Drop for Instance {
     fn drop(&mut self) {
+        // Shutdown worker thread first so it can't access the plugin after cleanup.
+        if let Some(mut worker) = self.worker_runtime.take() {
+            worker.shutdown();
+        }
         unsafe {
             if self.active {
                 if let Some(deactivate) = (*self.descriptor).deactivate {
