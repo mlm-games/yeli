@@ -59,6 +59,13 @@ pub mod uris {
     pub const BUF_MAX_BLOCK: &str = "http://lv2plug.in/ns/ext/buf-size#maxBlockLength";
     pub const BUF_NOMINAL_BLOCK: &str = "http://lv2plug.in/ns/ext/buf-size#nominalBlockLength";
     pub const BUF_SEQ_SIZE: &str = "http://lv2plug.in/ns/ext/buf-size#sequenceSize";
+
+    pub const UI_UI: &str = "http://lv2plug.in/ns/extensions/ui#ui";
+    pub const UI_BINARY: &str = "http://lv2plug.in/ns/extensions/ui#binary";
+    pub const UI_SHOWN_BY_DEFAULT: &str = "http://lv2plug.in/ns/extensions/ui#shownByDefault";
+    pub const UI_X11_UI: &str = "http://lv2plug.in/ns/extensions/ui#X11UI";
+    pub const UI_GTK_UI: &str = "http://lv2plug.in/ns/extensions/ui#GtkUI";
+    pub const UI_GTK3_UI: &str = "http://lv2plug.in/ns/extensions/ui#Gtk3UI";
 }
 
 /// Features this host can supply to plugins.
@@ -390,6 +397,14 @@ impl Port {
 }
 
 #[derive(Clone, Debug)]
+pub struct UiPlugin {
+    pub uri: String,
+    pub ui_type: String,
+    pub binary_path: PathBuf,
+    pub shown_by_default: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct Plugin {
     pub uri: String,
     pub name: String,
@@ -397,6 +412,7 @@ pub struct Plugin {
     pub binary_path: PathBuf,
     pub ports: Vec<Port>,
     pub required_features: Vec<String>,
+    pub uis: Vec<UiPlugin>,
 }
 
 impl Plugin {
@@ -766,6 +782,13 @@ impl World {
 
         let port_counts = plugin.port_counts();
 
+        let bundle = plugin.bundle_path.to_string_lossy().into_owned();
+        let bundle_str = if bundle.ends_with('/') {
+            bundle
+        } else {
+            format!("{bundle}/")
+        };
+
         Ok(Instance {
             handle,
             descriptor,
@@ -785,6 +808,9 @@ impl World {
             control_input_map,
             control_output_map,
             _library: library,
+            plugin_uri: plugin.uri.clone(),
+            bundle_path: bundle_str,
+            uis: plugin.uis.clone(),
         })
     }
 }
@@ -893,6 +919,52 @@ fn build_plugin(graph: &Graph, subject: &NamedNode, bundle: &Path) -> Result<Plu
     }
     ports.sort_by_key(|p| p.index);
 
+    let mut uis = Vec::new();
+    for ui_term in graph.objects_for_subject_predicate(s, nn(uris::UI_UI)) {
+        let ui_node: NamedOrBlankNodeRef = match ui_term {
+            TermRef::NamedNode(n) => n.into(),
+            TermRef::BlankNode(b) => b.into(),
+            _ => continue,
+        };
+        let ui_uri = match ui_term {
+            TermRef::NamedNode(n) => n.as_str().to_string(),
+            _ => String::new(),
+        };
+        let ui_type = graph
+            .objects_for_subject_predicate(ui_node, nn(uris::RDF_TYPE))
+            .filter_map(|t| match t {
+                TermRef::NamedNode(n) => Some(n.as_str()),
+                _ => None,
+            })
+            .find(|u| {
+                u == &uris::UI_X11_UI
+                    || u == &uris::UI_GTK_UI
+                    || u == &uris::UI_GTK3_UI
+            })
+            .map(|s| s.to_string());
+        let Some(ui_type) = ui_type else {
+            continue;
+        };
+        let binary_path = graph
+            .object_for_subject_predicate(ui_node, nn(uris::UI_BINARY))
+            .and_then(|t| match t {
+                TermRef::NamedNode(n) => file_uri_to_path(n.as_str()),
+                _ => None,
+            })
+            .unwrap_or_else(|| bundle.join("ui.so"));
+        let shown_by_default = graph
+            .object_for_subject_predicate(ui_node, nn(uris::UI_SHOWN_BY_DEFAULT))
+            .and_then(term_str)
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        uis.push(UiPlugin {
+            uri: ui_uri,
+            ui_type,
+            binary_path,
+            shown_by_default,
+        });
+    }
+
     Ok(Plugin {
         uri: subject.as_str().to_string(),
         name,
@@ -900,6 +972,7 @@ fn build_plugin(graph: &Graph, subject: &NamedNode, bundle: &Path) -> Result<Plu
         binary_path,
         ports,
         required_features,
+        uis,
     })
 }
 
@@ -1315,6 +1388,47 @@ pub struct Instance {
     control_input_map: HashMap<u32, usize>,
     control_output_map: HashMap<u32, usize>,
     _library: libloading::Library,
+    plugin_uri: String,
+    bundle_path: String,
+    uis: Vec<UiPlugin>,
+}
+
+/// A running LV2 UI instance.
+pub struct UiInstance {
+    handle: lv2_sys::LV2UI_Handle,
+    widget: lv2_sys::LV2UI_Widget,
+    descriptor: *const lv2_sys::LV2UI_Descriptor,
+    _library: libloading::Library,
+}
+
+// UiInstance is Send because it's just FFI handles
+unsafe impl Send for UiInstance {}
+
+impl UiInstance {
+    /// The native widget handle (X11 Window, GtkWidget*, etc.).
+    pub fn widget(&self) -> lv2_sys::LV2UI_Widget {
+        self.widget
+    }
+
+    /// Send a port event to the UI.
+    pub fn port_event(&self, port_index: u32, buffer_size: u32, protocol: u32, buffer: *const c_void) {
+        if let Some(port_event) = unsafe { (*self.descriptor).port_event } {
+            unsafe { port_event(self.handle, port_index, buffer_size, protocol, buffer) };
+        }
+    }
+
+    /// Destroy the UI (calls cleanup and drops the library).
+    pub fn cleanup(self) {
+        // drop handles cleanup via Drop impl
+    }
+}
+
+impl Drop for UiInstance {
+    fn drop(&mut self) {
+        if let Some(cleanup) = unsafe { (*self.descriptor).cleanup } {
+            unsafe { cleanup(self.handle) };
+        }
+    }
 }
 
 // An instance may be moved to (and used from exactly) one audio thread.
@@ -1633,6 +1747,120 @@ impl Instance {
             }
         }
         None
+    }
+
+    /// Whether this plugin has any discoverable UI.
+    pub fn has_editor(&self) -> bool {
+        !self.uis.is_empty()
+    }
+
+    /// Open the first discoverable UI for this plugin.
+    pub fn open_editor(&self) -> Result<UiInstance, Error> {
+        let ui = self.uis.first().ok_or_else(|| {
+            Error::PluginNotFound(self.plugin_uri.clone())
+        })?;
+
+        let library = unsafe { libloading::Library::new(&ui.binary_path) }
+            .map_err(|e| Error::Library(e.to_string()))?;
+
+        let descriptor_fn: libloading::Symbol<
+            unsafe extern "C" fn(u32) -> *const lv2_sys::LV2UI_Descriptor,
+        > = unsafe { library.get(b"lv2ui_descriptor\0") }
+            .map_err(|e| Error::Library(e.to_string()))?;
+
+        let descriptor = {
+            let mut i: u32 = 0;
+            let mut first: *const lv2_sys::LV2UI_Descriptor = std::ptr::null();
+            loop {
+                let d = unsafe { descriptor_fn(i) };
+                if d.is_null() {
+                    // If we have a named UI URI try matching it; otherwise
+                    // fall back to matching the plugin URI (common for
+                    // blank-node UIs).  As a last resort use the first
+                    // descriptor found.
+                    if !first.is_null() {
+                        break first;
+                    }
+                    return Err(Error::Library(
+                        "no matching LV2UI_Descriptor found".into(),
+                    ));
+                }
+                if first.is_null() {
+                    first = d;
+                }
+                let desc_uri =
+                    unsafe { std::ffi::CStr::from_ptr((*d).URI) }
+                        .to_bytes();
+                // Try matching UI URI first, then plugin URI as fallback
+                if (!ui.uri.is_empty() && desc_uri == ui.uri.as_bytes())
+                    || (ui.uri.is_empty() && desc_uri == self.plugin_uri.as_bytes())
+                {
+                    break d;
+                }
+                i += 1;
+            }
+        };
+
+        let bundle_c = CString::new(self.bundle_path.as_str())
+            .map_err(|_| Error::Instantiation(self.plugin_uri.clone()))?;
+        let plugin_uri_c = CString::new(self.plugin_uri.as_str())
+            .map_err(|_| Error::Instantiation(self.plugin_uri.clone()))?;
+
+        // Build feature data that outlives the instantiate call
+        let urid_handle = Arc::as_ptr(&self._urid) as *mut c_void;
+        let map_uri_c = CString::new(uris::URID_MAP).unwrap();
+        let unmap_uri_c = CString::new(uris::URID_UNMAP).unwrap();
+        let urid_map = lv2_sys::LV2_URID_Map {
+            handle: urid_handle,
+            map: Some(urid_map_cb),
+        };
+        let urid_unmap = lv2_sys::LV2_URID_Unmap {
+            handle: urid_handle,
+            unmap: Some(urid_unmap_cb),
+        };
+        let ui_features = vec![
+            lv2_sys::LV2_Feature {
+                URI: map_uri_c.as_ptr(),
+                data: &urid_map as *const lv2_sys::LV2_URID_Map as *mut c_void,
+            },
+            lv2_sys::LV2_Feature {
+                URI: unmap_uri_c.as_ptr(),
+                data: &urid_unmap as *const lv2_sys::LV2_URID_Unmap as *mut c_void,
+            },
+        ];
+        let mut ui_feature_ptrs: Vec<*const lv2_sys::LV2_Feature> = ui_features
+            .iter()
+            .map(|f| f as *const lv2_sys::LV2_Feature)
+            .collect();
+        ui_feature_ptrs.push(std::ptr::null());
+
+        let mut widget: lv2_sys::LV2UI_Widget = std::ptr::null_mut();
+
+        let instantiate = unsafe { (*descriptor).instantiate }
+            .ok_or_else(|| Error::Instantiation(self.plugin_uri.clone()))?;
+
+        let handle = unsafe {
+            instantiate(
+                descriptor,
+                plugin_uri_c.as_ptr(),
+                bundle_c.as_ptr(),
+                None,
+                std::ptr::null_mut(),
+                &mut widget,
+                ui_feature_ptrs.as_ptr(),
+            )
+        };
+
+        if handle.is_null() {
+            return Err(Error::Instantiation(self.plugin_uri.clone()));
+        }
+
+        Ok(UiInstance {
+            handle,
+            widget,
+            descriptor,
+            _library: library,
+        })
     }
 }
 

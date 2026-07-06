@@ -45,7 +45,7 @@ dependencies = [
 [[package]]
 name = "lv2-sys"
 version = "2.0.0"
-source = "git+https://github.com/mlm-games/rust-lv2#d603cb4d3187229d185527271d594be302b0c682"
+source = "git+https://github.com/mlm-games/rust-lv2#7256eb42048f787e07541c9c2fab58e31eba587b"
 
 [[package]]
 name = "memchr"
