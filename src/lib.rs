@@ -1646,7 +1646,10 @@ impl UiInstance {
     }
 
     /// Send a port event to the UI.
-    pub fn port_event(
+    /// # Safety
+    /// `buffer` must be a valid pointer to `buffer_size` bytes of memory for the
+    /// given `protocol`.
+    pub unsafe fn port_event(
         &self,
         port_index: u32,
         buffer_size: u32,
@@ -1848,7 +1851,7 @@ impl Instance {
             .zip(self.atom_output_indices.iter())
         {
             seq.clear_as_chunk();
-            unsafe { connect(self.handle, index, seq.as_mut_ptr() as *mut c_void) };
+            unsafe { connect(self.handle, index, seq.as_mut_ptr()) };
         }
 
         if !self.active {
@@ -1953,12 +1956,14 @@ impl Instance {
         for (port, buf) in self.ports.iter().zip(self.buffers.iter()) {
             if let PortBuffer::Control(v) = buf {
                 let value = **v;
-                ui.port_event(
-                    port.index,
-                    4,
-                    FLOAT_PROTOCOL,
-                    &value as *const f32 as *const c_void,
-                );
+                unsafe {
+                    ui.port_event(
+                        port.index,
+                        4,
+                        FLOAT_PROTOCOL,
+                        &value as *const f32 as *const c_void,
+                    );
+                }
             }
         }
     }
