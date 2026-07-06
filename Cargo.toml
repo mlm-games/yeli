@@ -1,0 +1,16 @@
+[package]
+name = "yeli"
+version = "0.1.0"
+edition = "2024"
+description = "A pure-Rust LV2 plugin host (livi alternative, no lilv/serd/sord C code)"
+license = "MIT"
+
+[lib]
+name = "yeli"
+
+[dependencies]
+oxttl = "0.1"
+oxrdf = "0.2"
+lv2-sys = "2.0"
+libloading = "0.8"
+hound = "3.5"
