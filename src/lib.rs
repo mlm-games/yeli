@@ -18,7 +18,7 @@ use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use oxrdf::{Graph, NamedNode, NamedNodeRef, SubjectRef, TermRef};
+use oxrdf::{Graph, NamedNode, NamedNodeRef, NamedOrBlankNodeRef, TermRef};
 use oxttl::TurtleParser;
 
 pub mod uris {
@@ -574,7 +574,7 @@ impl World {
         let subjects: Vec<NamedNode> = graph
             .subjects_for_predicate_object(nn(uris::RDF_TYPE), nn(uris::LV2_PLUGIN))
             .filter_map(|s| match s {
-                SubjectRef::NamedNode(n) => Some(n.into_owned()),
+                NamedOrBlankNodeRef::NamedNode(n) => Some(n.into_owned()),
                 _ => None,
             })
             .collect();
@@ -815,7 +815,7 @@ fn build_plugin(graph: &Graph, subject: &NamedNode, bundle: &Path) -> Result<Plu
 
     let mut ports = Vec::new();
     for term in graph.objects_for_subject_predicate(s, nn(uris::LV2_PORT)) {
-        let ps: SubjectRef = match term {
+        let ps: NamedOrBlankNodeRef = match term {
             TermRef::NamedNode(n) => n.into(),
             TermRef::BlankNode(b) => b.into(),
             _ => continue,
