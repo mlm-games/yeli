@@ -69,7 +69,10 @@ fn cmd_info(uri: &str) {
 
 fn cmd_run(args: &[String]) {
     let uri = &args[0];
-    let out_path = args.get(1).cloned().unwrap_or_else(|| "out.wav".to_string());
+    let out_path = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "out.wav".to_string());
     let seconds: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2.0);
     let note: u8 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(60);
 
@@ -88,9 +91,10 @@ fn cmd_run(args: &[String]) {
         }
     };
 
-    let has_atom_in = plugin.ports.iter().any(|p| {
-        p.kind == PortKind::AtomSequence && p.direction == PortDirection::Input
-    });
+    let has_atom_in = plugin
+        .ports
+        .iter()
+        .any(|p| p.kind == PortKind::AtomSequence && p.direction == PortDirection::Input);
     let n_in = instance.n_audio_inputs();
     let n_out = instance.n_audio_outputs();
     println!("audio: {n_in} in / {n_out} out, midi-in: {has_atom_in}");
