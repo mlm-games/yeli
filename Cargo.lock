@@ -44,8 +44,7 @@ dependencies = [
 [[package]]
 name = "lv2-sys"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dd0f9e7de3649dcec348de51cbf611ab88688b97c0ce038f8c07b996b2a8e30"
+source = "git+https://github.com/mlm-games/rust-lv2#7e77ce3216b76e466f023d122c4aaf2cd8b43b75"
 
 [[package]]
 name = "memchr"
