@@ -72,6 +72,32 @@ pub const SUPPORTED_FEATURES: [&str; 4] = [
 /// Capacity (bytes) of atom sequence port buffers.
 pub const ATOM_SEQUENCE_CAPACITY: usize = 8192;
 
+/// The number of ports by type.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct PortCounts {
+    pub control_inputs: usize,
+    pub control_outputs: usize,
+    pub audio_inputs: usize,
+    pub audio_outputs: usize,
+    pub atom_sequence_inputs: usize,
+    pub atom_sequence_outputs: usize,
+    pub cv_inputs: usize,
+    pub cv_outputs: usize,
+}
+
+/// Combined port type (direction + data kind), matching livi's `PortType`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PortType {
+    ControlInput,
+    ControlOutput,
+    AudioInput,
+    AudioOutput,
+    AtomSequenceInput,
+    AtomSequenceOutput,
+    CVInput,
+    CVOutput,
+}
+
 #[derive(Debug)]
 pub enum Error {
     Io(std::io::Error),
@@ -84,6 +110,8 @@ pub enum Error {
     Instantiation(String),
     BufferTooSmall,
     BlockTooLarge { requested: usize, max: usize },
+    BlockTooSmall { requested: usize, min: usize },
+    PortCountMismatch { expected: usize, actual: usize },
 }
 
 impl fmt::Display for Error {
@@ -100,6 +128,12 @@ impl fmt::Display for Error {
             Error::BufferTooSmall => write!(f, "atom buffer too small"),
             Error::BlockTooLarge { requested, max } => {
                 write!(f, "block of {requested} frames exceeds maximum {max}")
+            }
+            Error::BlockTooSmall { requested, min } => {
+                write!(f, "block of {requested} frames is below minimum {min}")
+            }
+            Error::PortCountMismatch { expected, actual } => {
+                write!(f, "expected {expected} ports but got {actual}")
             }
         }
     }
@@ -149,6 +183,72 @@ fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
+/// Builder for a shareable `Features` object.
+#[derive(Clone, Debug)]
+pub struct FeaturesBuilder {
+    /// Minimum block size. `run()` calls with fewer samples will error.
+    pub min_block_length: usize,
+    /// Maximum block size. `run()` calls with more samples will error.
+    pub max_block_length: usize,
+}
+
+impl Default for FeaturesBuilder {
+    fn default() -> Self {
+        FeaturesBuilder {
+            min_block_length: 1,
+            max_block_length: 4096,
+        }
+    }
+}
+
+/// Host features shared across plugin instances.
+///
+/// Provides URID mapping, block size constraints, and pre-resolved URIDs
+/// for atom sequences and MIDI events.
+pub struct Features {
+    urid: Arc<UridMap>,
+    min_block_length: usize,
+    max_block_length: usize,
+    atom_seq_urid: u32,
+    atom_chunk_urid: u32,
+    midi_urid: u32,
+}
+
+impl Features {
+    /// The minimum allowed block length.
+    pub fn min_block_length(&self) -> usize {
+        self.min_block_length
+    }
+
+    /// The maximum allowed block length.
+    pub fn max_block_length(&self) -> usize {
+        self.max_block_length
+    }
+
+    /// The URID for the `midi:MidiEvent` URI.
+    pub fn midi_urid(&self) -> u32 {
+        self.midi_urid
+    }
+
+    /// Map a URI string to a URID.
+    pub fn urid(&self, uri: &str) -> u32 {
+        self.urid.map(uri)
+    }
+
+    /// The underlying URID map.
+    pub fn urid_map(&self) -> &Arc<UridMap> {
+        &self.urid
+    }
+
+    fn atom_seq_urid(&self) -> u32 {
+        self.atom_seq_urid
+    }
+
+    fn atom_chunk_urid(&self) -> u32 {
+        self.atom_chunk_urid
+    }
+}
+
 struct UridState {
     by_uri: HashMap<CString, u32>,
     by_id: Vec<CString>,
@@ -188,6 +288,13 @@ impl UridMap {
         id
     }
 
+    fn map_ptr(&self, uri: *const c_char) -> u32 {
+        if uri.is_null() {
+            return 0;
+        }
+        self.map_c(unsafe { CStr::from_ptr(uri) })
+    }
+
     pub fn unmap(&self, id: u32) -> Option<String> {
         let st = self.inner.lock().unwrap();
         st.by_id
@@ -213,7 +320,7 @@ unsafe extern "C" fn urid_map_cb(
         return 0;
     }
     let map = unsafe { &*(handle as *const UridMap) };
-    map.map_c(unsafe { CStr::from_ptr(uri) })
+    map.map_ptr(uri)
 }
 
 unsafe extern "C" fn urid_unmap_cb(
@@ -255,6 +362,29 @@ pub struct Port {
     pub optional: bool,
 }
 
+impl Port {
+    /// Return the combined `PortType` (direction + kind), matching livi's enum.
+    pub fn port_type(&self) -> PortType {
+        match (self.direction, self.kind) {
+            (PortDirection::Input, PortKind::Control) => PortType::ControlInput,
+            (PortDirection::Output, PortKind::Control) => PortType::ControlOutput,
+            (PortDirection::Input, PortKind::Audio) => PortType::AudioInput,
+            (PortDirection::Output, PortKind::Audio) => PortType::AudioOutput,
+            (PortDirection::Input, PortKind::AtomSequence) => PortType::AtomSequenceInput,
+            (PortDirection::Output, PortKind::AtomSequence) => PortType::AtomSequenceOutput,
+            (PortDirection::Input, PortKind::Cv) => PortType::CVInput,
+            (PortDirection::Output, PortKind::Cv) => PortType::CVOutput,
+            (_, PortKind::Unknown) => {
+                if self.direction == PortDirection::Input {
+                    PortType::ControlInput
+                } else {
+                    PortType::ControlOutput
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Plugin {
     pub uri: String,
@@ -263,6 +393,46 @@ pub struct Plugin {
     pub binary_path: PathBuf,
     pub ports: Vec<Port>,
     pub required_features: Vec<String>,
+}
+
+impl Plugin {
+    /// Return a slice of all ports.
+    pub fn ports(&self) -> &[Port] {
+        &self.ports
+    }
+
+    /// The number of ports by type.
+    pub fn port_counts(&self) -> PortCounts {
+        let mut c = PortCounts::default();
+        for p in &self.ports {
+            match p.port_type() {
+                PortType::ControlInput => c.control_inputs += 1,
+                PortType::ControlOutput => c.control_outputs += 1,
+                PortType::AudioInput => c.audio_inputs += 1,
+                PortType::AudioOutput => c.audio_outputs += 1,
+                PortType::AtomSequenceInput => c.atom_sequence_inputs += 1,
+                PortType::AtomSequenceOutput => c.atom_sequence_outputs += 1,
+                PortType::CVInput => c.cv_inputs += 1,
+                PortType::CVOutput => c.cv_outputs += 1,
+            }
+        }
+        c
+    }
+
+    /// Return `true` if the plugin is an instrument
+    /// (has at least one atom-sequence input and at least one audio output).
+    pub fn is_instrument(&self) -> bool {
+        let mut has_atom_in = false;
+        let mut has_audio_out = false;
+        for p in &self.ports {
+            match p.port_type() {
+                PortType::AtomSequenceInput => has_atom_in = true,
+                PortType::AudioOutput => has_audio_out = true,
+                _ => {}
+            }
+        }
+        has_atom_in && has_audio_out
+    }
 }
 
 // -- small RDF helpers -------------------------------------------------------
@@ -364,6 +534,26 @@ impl World {
         &self.urid
     }
 
+    /// Build a shareable `Features` object from this world.
+    pub fn build_features(&self, builder: FeaturesBuilder) -> Arc<Features> {
+        let atom_seq_urid = self.urid.map(uris::ATOM_SEQUENCE);
+        let atom_chunk_urid = self.urid.map(uris::ATOM_CHUNK);
+        let midi_urid = self.urid.map(uris::MIDI_EVENT);
+        Arc::new(Features {
+            urid: self.urid.clone(),
+            min_block_length: builder.min_block_length,
+            max_block_length: builder.max_block_length,
+            atom_seq_urid,
+            atom_chunk_urid,
+            midi_urid,
+        })
+    }
+
+    /// Iterate through all discovered plugins.
+    pub fn iter_plugins(&self) -> impl ExactSizeIterator<Item = &Plugin> {
+        self.plugins.iter()
+    }
+
     pub fn plugin_by_uri(&self, uri: &str) -> Option<&Plugin> {
         self.plugins.iter().find(|p| p.uri == uri)
     }
@@ -420,13 +610,26 @@ impl World {
         Ok(())
     }
 
-    /// Instantiate a plugin. `max_block` is the largest frame count you will
-    /// ever pass to [`Instance::run`].
+    /// Instantiate a plugin with default features (min_block=1).
     pub fn instantiate(
         &self,
         plugin: &Plugin,
         sample_rate: f64,
         max_block: usize,
+    ) -> Result<Instance, Error> {
+        let features = self.build_features(FeaturesBuilder {
+            min_block_length: 1,
+            max_block_length: max_block,
+        });
+        self.instantiate_with_features(plugin, sample_rate, &features)
+    }
+
+    /// Instantiate a plugin with the given shareable `Features`.
+    pub fn instantiate_with_features(
+        &self,
+        plugin: &Plugin,
+        sample_rate: f64,
+        features: &Features,
     ) -> Result<Instance, Error> {
         // 1. Feature check.
         for f in &plugin.required_features {
@@ -444,10 +647,13 @@ impl World {
             }
         }
 
-        // 3. Build the feature array (heap-pinned; must outlive the instance).
-        let features = build_features(
+        let max_block = features.max_block_length();
+        let min_block = features.min_block_length();
+
+        // 3. Build the C feature array (heap-pinned; must outlive the instance).
+        let c_features = build_c_features(
             &self.urid,
-            1,
+            min_block as i32,
             max_block as i32,
             ATOM_SEQUENCE_CAPACITY as i32,
         );
@@ -488,7 +694,7 @@ impl World {
                 descriptor,
                 sample_rate,
                 bundle_c.as_ptr(),
-                features.feature_ptrs.as_ptr(),
+                c_features.feature_ptrs.as_ptr(),
             )
         };
         if handle.is_null() {
@@ -524,11 +730,33 @@ impl World {
             let ptr: *mut c_void = match buf {
                 PortBuffer::Control(v) => (&mut **v) as *mut f32 as *mut c_void,
                 PortBuffer::Audio(v) => v.as_mut_ptr() as *mut c_void,
-                PortBuffer::AtomIn(s) | PortBuffer::AtomOut(s) => s.raw_ptr(),
+                PortBuffer::AtomIn(s) | PortBuffer::AtomOut(s) => s.as_mut_ptr(),
                 PortBuffer::Unconnected => std::ptr::null_mut(),
             };
             unsafe { connect(handle, port.index, ptr) };
         }
+
+        // 7. Build port index mappings for run_with_ports.
+        let mut audio_input_indices = Vec::new();
+        let mut audio_output_indices = Vec::new();
+        let mut atom_input_indices = Vec::new();
+        let mut atom_output_indices = Vec::new();
+        let mut control_input_map = HashMap::new();
+
+        for (buf_idx, port) in plugin.ports.iter().enumerate() {
+            match port.port_type() {
+                PortType::AudioInput => audio_input_indices.push(port.index),
+                PortType::AudioOutput => audio_output_indices.push(port.index),
+                PortType::AtomSequenceInput => atom_input_indices.push(port.index),
+                PortType::AtomSequenceOutput => atom_output_indices.push(port.index),
+                PortType::ControlInput => {
+                    control_input_map.insert(port.index, buf_idx);
+                }
+                _ => {}
+            }
+        }
+
+        let port_counts = plugin.port_counts();
 
         Ok(Instance {
             handle,
@@ -536,10 +764,17 @@ impl World {
             active: false,
             ports: plugin.ports.clone(),
             buffers,
-            _features: features,
+            _features: c_features,
             _urid: self.urid.clone(),
             midi_urid,
             max_block,
+            min_block,
+            port_counts,
+            audio_input_indices,
+            audio_output_indices,
+            atom_input_indices,
+            atom_output_indices,
+            control_input_map,
             _library: library,
         })
     }
@@ -622,7 +857,7 @@ fn build_plugin(graph: &Graph, subject: &NamedNode, bundle: &Path) -> Result<Plu
             (dir.unwrap_or(PortDirection::Input), kind)
         };
         if !has(uris::LV2_INPUT_PORT) && !has(uris::LV2_OUTPUT_PORT) {
-            kind = PortKind::Unknown; // no declared direction: refuse to connect
+            kind = PortKind::Unknown;
         }
 
         let optional = graph
@@ -684,7 +919,7 @@ fn opt(key: u32, type_: u32, value: *const c_void) -> lv2_sys::LV2_Options_Optio
     }
 }
 
-fn build_features(
+fn build_c_features(
     urid: &Arc<UridMap>,
     min_block: i32,
     max_block: i32,
@@ -710,7 +945,6 @@ fn build_features(
         feature_ptrs: Vec::new(),
     });
 
-    // The Box gives all fields stable heap addresses.
     let handle = Arc::as_ptr(&f._urid) as *mut c_void;
     f.map.handle = handle;
     f.unmap.handle = handle;
@@ -725,7 +959,6 @@ fn build_features(
         opt(urid.map(uris::BUF_MAX_BLOCK), atom_int, p_max),
         opt(urid.map(uris::BUF_NOMINAL_BLOCK), atom_int, p_nom),
         opt(urid.map(uris::BUF_SEQ_SIZE), atom_int, p_seq),
-        // zero terminator
         lv2_sys::LV2_Options_Option {
             context: 0,
             subject: 0,
@@ -796,7 +1029,11 @@ pub struct AtomSequence {
 const SEQ_HEADER: usize = 16;
 
 impl AtomSequence {
-    fn new(body_capacity: usize, seq_urid: u32, chunk_urid: u32, input: bool) -> Self {
+    /// Create a new atom sequence with the given capacity (bytes for event body).
+    /// Supply the pre-resolved URIDs for `atom:Sequence` and `atom:Chunk`.
+    /// When `input` is true the header is set as a sequence; when false it is
+    /// set as a chunk (output).
+    pub fn new(body_capacity: usize, seq_urid: u32, chunk_urid: u32, input: bool) -> Self {
         let total = SEQ_HEADER + body_capacity;
         let mut s = AtomSequence {
             buf: vec![0u64; (total + 7) / 8],
@@ -812,6 +1049,16 @@ impl AtomSequence {
             s.prepare_output();
         }
         s
+    }
+
+    /// Create a new atom sequence using pre-resolved URIDs from `Features`.
+    pub fn with_features(body_capacity: usize, features: &Features, input: bool) -> Self {
+        Self::new(
+            body_capacity,
+            features.atom_seq_urid(),
+            features.atom_chunk_urid(),
+            input,
+        )
     }
 
     fn bytes(&self) -> &[u8] {
@@ -833,7 +1080,7 @@ impl AtomSequence {
     }
 
     fn write_input_header(&mut self) {
-        let size = (8 + self.events_bytes) as u32; // body header + events
+        let size = (8 + self.events_bytes) as u32;
         let seq = self.seq_urid;
         self.put_u32(0, size);
         self.put_u32(4, seq);
@@ -843,11 +1090,18 @@ impl AtomSequence {
 
     /// Host-side preparation of an output sequence before `run()`:
     /// set atom.size to the buffer capacity and type to atom:Chunk.
-    fn prepare_output(&mut self) {
+    pub fn prepare_output(&mut self) {
         let cap = self.body_capacity as u32;
         let chunk = self.chunk_urid;
         self.put_u32(0, cap);
         self.put_u32(4, chunk);
+    }
+
+    /// Clear all events and designate the sequence as a chunk (output).
+    /// Equivalent to livi's `clear_as_chunk`.
+    pub fn clear_as_chunk(&mut self) {
+        self.events_bytes = 0;
+        self.prepare_output();
     }
 
     /// Remove all events (input sequences).
@@ -902,8 +1156,125 @@ impl AtomSequence {
         out
     }
 
-    fn raw_ptr(&mut self) -> *mut c_void {
+    /// Constant pointer to the underlying C-compatible buffer.
+    pub fn as_ptr(&self) -> *const c_void {
+        self.buf.as_ptr() as *const c_void
+    }
+
+    /// Mutable pointer to the underlying C-compatible buffer.
+    pub fn as_mut_ptr(&mut self) -> *mut c_void {
         self.buf.as_mut_ptr() as *mut c_void
+    }
+}
+
+/// A builder for port connections passed to `Instance::run_with_ports`.
+pub struct PortConnections<'a, AI, AO, ASI, ASO>
+where
+    AI: ExactSizeIterator + Iterator<Item = &'a [f32]>,
+    AO: ExactSizeIterator + Iterator<Item = &'a mut [f32]>,
+    ASI: ExactSizeIterator + Iterator<Item = &'a AtomSequence>,
+    ASO: ExactSizeIterator + Iterator<Item = &'a mut AtomSequence>,
+{
+    /// Audio input buffers.
+    pub audio_inputs: AI,
+    /// Audio output buffers.
+    pub audio_outputs: AO,
+    /// Atom-sequence input buffers.
+    pub atom_sequence_inputs: ASI,
+    /// Atom-sequence output buffers.
+    pub atom_sequence_outputs: ASO,
+}
+
+/// A `PortConnections` with no connections.
+pub type EmptyPortConnections = PortConnections<
+    'static,
+    std::iter::Empty<&'static [f32]>,
+    std::iter::Empty<&'static mut [f32]>,
+    std::iter::Empty<&'static AtomSequence>,
+    std::iter::Empty<&'static mut AtomSequence>,
+>;
+
+impl EmptyPortConnections {
+    /// Create a new `PortConnections` object without any connections.
+    pub fn new() -> EmptyPortConnections {
+        EmptyPortConnections {
+            audio_inputs: std::iter::empty(),
+            audio_outputs: std::iter::empty(),
+            atom_sequence_inputs: std::iter::empty(),
+            atom_sequence_outputs: std::iter::empty(),
+        }
+    }
+}
+
+impl Default for EmptyPortConnections {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a, AI, AO, ASI, ASO> PortConnections<'a, AI, AO, ASI, ASO>
+where
+    AI: ExactSizeIterator + Iterator<Item = &'a [f32]>,
+    AO: ExactSizeIterator + Iterator<Item = &'a mut [f32]>,
+    ASI: ExactSizeIterator + Iterator<Item = &'a AtomSequence>,
+    ASO: ExactSizeIterator + Iterator<Item = &'a mut AtomSequence>,
+{
+    /// Add audio input buffers.
+    pub fn with_audio_inputs<I>(self, audio_inputs: I) -> PortConnections<'a, I, AO, ASI, ASO>
+    where
+        I: ExactSizeIterator + Iterator<Item = &'a [f32]>,
+    {
+        PortConnections {
+            audio_inputs,
+            audio_outputs: self.audio_outputs,
+            atom_sequence_inputs: self.atom_sequence_inputs,
+            atom_sequence_outputs: self.atom_sequence_outputs,
+        }
+    }
+
+    /// Add audio output buffers.
+    pub fn with_audio_outputs<I>(self, audio_outputs: I) -> PortConnections<'a, AI, I, ASI, ASO>
+    where
+        I: ExactSizeIterator + Iterator<Item = &'a mut [f32]>,
+    {
+        PortConnections {
+            audio_inputs: self.audio_inputs,
+            audio_outputs,
+            atom_sequence_inputs: self.atom_sequence_inputs,
+            atom_sequence_outputs: self.atom_sequence_outputs,
+        }
+    }
+
+    /// Add atom-sequence input buffers.
+    pub fn with_atom_sequence_inputs<I>(
+        self,
+        atom_sequence_inputs: I,
+    ) -> PortConnections<'a, AI, AO, I, ASO>
+    where
+        I: ExactSizeIterator + Iterator<Item = &'a AtomSequence>,
+    {
+        PortConnections {
+            audio_inputs: self.audio_inputs,
+            audio_outputs: self.audio_outputs,
+            atom_sequence_inputs,
+            atom_sequence_outputs: self.atom_sequence_outputs,
+        }
+    }
+
+    /// Add atom-sequence output buffers.
+    pub fn with_atom_sequence_outputs<I>(
+        self,
+        atom_sequence_outputs: I,
+    ) -> PortConnections<'a, AI, AO, ASI, I>
+    where
+        I: ExactSizeIterator + Iterator<Item = &'a mut AtomSequence>,
+    {
+        PortConnections {
+            audio_inputs: self.audio_inputs,
+            audio_outputs: self.audio_outputs,
+            atom_sequence_inputs: self.atom_sequence_inputs,
+            atom_sequence_outputs,
+        }
     }
 }
 
@@ -925,7 +1296,14 @@ pub struct Instance {
     _features: Box<InstanceFeatures>,
     _urid: Arc<UridMap>,
     midi_urid: u32,
+    min_block: usize,
     max_block: usize,
+    port_counts: PortCounts,
+    audio_input_indices: Vec<u32>,
+    audio_output_indices: Vec<u32>,
+    atom_input_indices: Vec<u32>,
+    atom_output_indices: Vec<u32>,
+    control_input_map: HashMap<u32, usize>,
     _library: libloading::Library,
 }
 
@@ -935,6 +1313,11 @@ unsafe impl Send for Instance {}
 impl Instance {
     pub fn ports(&self) -> &[Port] {
         &self.ports
+    }
+
+    /// Port counts for this instance.
+    pub fn port_counts(&self) -> PortCounts {
+        self.port_counts
     }
 
     pub fn activate(&mut self) {
@@ -955,9 +1338,14 @@ impl Instance {
         }
     }
 
-    /// Process `frames` samples. Fill audio inputs and push MIDI first; read
-    /// audio/atom outputs afterwards. Input events are cleared after the call.
+    /// Process `frames` samples using the instance's own internal buffers.
     pub fn run(&mut self, frames: usize) -> Result<(), Error> {
+        if frames < self.min_block {
+            return Err(Error::BlockTooSmall {
+                requested: frames,
+                min: self.min_block,
+            });
+        }
         if frames > self.max_block {
             return Err(Error::BlockTooLarge {
                 requested: frames,
@@ -983,6 +1371,116 @@ impl Instance {
         Ok(())
     }
 
+    /// Process `samples` frames using externally-provided buffers.
+    ///
+    /// This matches livi's `instance.run(samples, ports)` pattern:
+    /// audio and atom ports are re-connected every call, while control ports
+    /// remain connected to the internal buffers set during instantiation.
+    ///
+    /// # Safety
+    /// Running plugin code is inherently unsafe. The caller must ensure all
+    /// buffers are valid for the duration of the call.
+    pub fn run_with_ports<'a, AI, AO, ASI, ASO>(
+        &mut self,
+        samples: usize,
+        ports: PortConnections<'a, AI, AO, ASI, ASO>,
+    ) -> Result<(), Error>
+    where
+        AI: ExactSizeIterator + Iterator<Item = &'a [f32]>,
+        AO: ExactSizeIterator + Iterator<Item = &'a mut [f32]>,
+        ASI: ExactSizeIterator + Iterator<Item = &'a AtomSequence>,
+        ASO: ExactSizeIterator + Iterator<Item = &'a mut AtomSequence>,
+    {
+        if samples < self.min_block {
+            return Err(Error::BlockTooSmall {
+                requested: samples,
+                min: self.min_block,
+            });
+        }
+        if samples > self.max_block {
+            return Err(Error::BlockTooLarge {
+                requested: samples,
+                max: self.max_block,
+            });
+        }
+
+        let connect = unsafe { (*self.descriptor).connect_port }
+            .ok_or_else(|| Error::Instantiation("descriptor has no connect_port".into()))?;
+
+        // Validate and connect audio inputs.
+        if ports.audio_inputs.len() != self.audio_input_indices.len() {
+            return Err(Error::PortCountMismatch {
+                expected: self.audio_input_indices.len(),
+                actual: ports.audio_inputs.len(),
+            });
+        }
+        for (data, &index) in ports.audio_inputs.zip(self.audio_input_indices.iter()) {
+            if data.len() < samples {
+                return Err(Error::PortCountMismatch {
+                    expected: samples,
+                    actual: data.len(),
+                });
+            }
+            unsafe { connect(self.handle, index, data.as_ptr() as *mut c_void) };
+        }
+
+        // Validate and connect audio outputs.
+        if ports.audio_outputs.len() != self.audio_output_indices.len() {
+            return Err(Error::PortCountMismatch {
+                expected: self.audio_output_indices.len(),
+                actual: ports.audio_outputs.len(),
+            });
+        }
+        for (data, &index) in ports.audio_outputs.zip(self.audio_output_indices.iter()) {
+            if data.len() < samples {
+                return Err(Error::PortCountMismatch {
+                    expected: samples,
+                    actual: data.len(),
+                });
+            }
+            unsafe { connect(self.handle, index, data.as_mut_ptr() as *mut c_void) };
+        }
+
+        // Validate and connect atom sequence inputs.
+        if ports.atom_sequence_inputs.len() != self.atom_input_indices.len() {
+            return Err(Error::PortCountMismatch {
+                expected: self.atom_input_indices.len(),
+                actual: ports.atom_sequence_inputs.len(),
+            });
+        }
+        for (seq, &index) in ports
+            .atom_sequence_inputs
+            .zip(self.atom_input_indices.iter())
+        {
+            unsafe { connect(self.handle, index, seq.as_ptr() as *mut c_void) };
+        }
+
+        // Validate, clear-as-chunk, and connect atom sequence outputs.
+        if ports.atom_sequence_outputs.len() != self.atom_output_indices.len() {
+            return Err(Error::PortCountMismatch {
+                expected: self.atom_output_indices.len(),
+                actual: ports.atom_sequence_outputs.len(),
+            });
+        }
+        for (seq, &index) in ports
+            .atom_sequence_outputs
+            .zip(self.atom_output_indices.iter())
+        {
+            seq.clear_as_chunk();
+            unsafe { connect(self.handle, index, seq.as_mut_ptr() as *mut c_void) };
+        }
+
+        if !self.active {
+            self.activate();
+        }
+
+        let run = unsafe { (*self.descriptor).run }
+            .ok_or_else(|| Error::Instantiation("descriptor has no run()".into()))?;
+        unsafe { run(self.handle, samples as u32) };
+
+        Ok(())
+    }
+
     /// Queue a raw MIDI message into the first atom-sequence input port.
     pub fn push_midi(&mut self, frame: i64, message: &[u8]) -> Result<(), Error> {
         let midi = self.midi_urid;
@@ -998,6 +1496,26 @@ impl Instance {
         ))
     }
 
+    /// Set a control input by its port index (matching livi's
+    /// `instance.set_control_input(index, value)`).
+    ///
+    /// Returns the clamped value that was actually written.
+    pub fn set_control_input(&mut self, index: u32, value: f32) -> Option<f32> {
+        let &buf_idx = self.control_input_map.get(&index)?;
+        match &mut self.buffers[buf_idx] {
+            PortBuffer::Control(v) => {
+                let port = &self.ports[buf_idx];
+                let min = port.minimum.unwrap_or(f32::NEG_INFINITY);
+                let max = port.maximum.unwrap_or(f32::INFINITY);
+                let clamped = value.clamp(min, max);
+                **v = clamped;
+                Some(clamped)
+            }
+            _ => None,
+        }
+    }
+
+    /// Set a control input by symbol name.
     pub fn set_control(&mut self, symbol: &str, value: f32) -> bool {
         for (port, buf) in self.ports.iter().zip(self.buffers.iter_mut()) {
             if port.symbol == symbol {
@@ -1010,6 +1528,7 @@ impl Instance {
         false
     }
 
+    /// Read a control port value by symbol name.
     pub fn control(&self, symbol: &str) -> Option<f32> {
         for (port, buf) in self.ports.iter().zip(self.buffers.iter()) {
             if port.symbol == symbol {
@@ -1021,6 +1540,7 @@ impl Instance {
         None
     }
 
+    /// Iterate over all control ports and their values.
     pub fn controls(&self) -> impl Iterator<Item = (&Port, f32)> + '_ {
         self.ports
             .iter()
