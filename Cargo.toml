@@ -1,6 +1,6 @@
 [package]
 name = "yeli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A pure-Rust LV2 plugin host (livi alternative, no lilv/serd/sord C code)"
 license = "LGPL-2.1-or-later"
