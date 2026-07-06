@@ -68,6 +68,14 @@ pub mod uris {
     pub const UI_X11_UI: &str = "http://lv2plug.in/ns/extensions/ui#X11UI";
     pub const UI_GTK_UI: &str = "http://lv2plug.in/ns/extensions/ui#GtkUI";
     pub const UI_GTK3_UI: &str = "http://lv2plug.in/ns/extensions/ui#Gtk3UI";
+    pub const UI_SHOW_INTERFACE: &str = "http://lv2plug.in/ns/extensions/ui#showInterface";
+    pub const UI_WINDOW_ID: &str = "http://lv2plug.in/ns/extensions/ui#windowId";
+    pub const UI_PARENT: &str = "http://lv2plug.in/ns/extensions/ui#parent";
+    pub const UI_IDLE_INTERFACE: &str = "http://lv2plug.in/ns/extensions/ui#idleInterface";
+
+    pub const PARAM_SAMPLE_RATE: &str = "http://lv2plug.in/ns/ext/parameters#sampleRate";
+    pub const ATOM_DOUBLE: &str = "http://lv2plug.in/ns/ext/atom#Double";
+    pub const ATOM_FLOAT: &str = "http://lv2plug.in/ns/ext/atom#Float";
 
     pub const WORKER_SCHEDULE: &str = "http://lv2plug.in/ns/ext/worker#schedule";
     pub const WORKER_INTERFACE: &str = "http://lv2plug.in/ns/ext/worker#interface";
@@ -730,8 +738,7 @@ impl World {
 
         // 5a. Check for worker interface extension and start worker thread.
         let worker_runtime = if let Some(ext_data) = unsafe { (*descriptor).extension_data } {
-            let worker_iface_uri =
-                CString::new(uris::WORKER_INTERFACE).expect("valid CString");
+            let worker_iface_uri = CString::new(uris::WORKER_INTERFACE).expect("valid CString");
             let iface_ptr = unsafe { ext_data(worker_iface_uri.as_ptr()) };
             if !iface_ptr.is_null() {
                 let iface = unsafe { &*(iface_ptr as *const lv2_sys::LV2_Worker_Interface) };
@@ -824,6 +831,7 @@ impl World {
             worker_runtime,
             _urid: self.urid.clone(),
             midi_urid,
+            sample_rate,
             max_block,
             min_block,
             port_counts,
@@ -962,11 +970,7 @@ fn build_plugin(graph: &Graph, subject: &NamedNode, bundle: &Path) -> Result<Plu
                 TermRef::NamedNode(n) => Some(n.as_str()),
                 _ => None,
             })
-            .find(|u| {
-                u == &uris::UI_X11_UI
-                    || u == &uris::UI_GTK_UI
-                    || u == &uris::UI_GTK3_UI
-            })
+            .find(|u| u == &uris::UI_X11_UI || u == &uris::UI_GTK_UI || u == &uris::UI_GTK3_UI)
             .map(|s| s.to_string());
         let Some(ui_type) = ui_type else {
             continue;
@@ -1065,10 +1069,7 @@ struct WorkerRuntime {
 }
 
 impl WorkerRuntime {
-    fn new(
-        iface: &lv2_sys::LV2_Worker_Interface,
-        plugin_handle: lv2_sys::LV2_Handle,
-    ) -> Self {
+    fn new(iface: &lv2_sys::LV2_Worker_Interface, plugin_handle: lv2_sys::LV2_Handle) -> Self {
         let shared = Arc::new(WorkerShared {
             pending: Mutex::new(Vec::new()),
             completed: Mutex::new(Vec::new()),
@@ -1123,7 +1124,8 @@ impl WorkerRuntime {
 
             // The respond handle is a pointer to WorkerShared so the
             // respond callback can recover it without a thread-local.
-            let respond_handle = Arc::as_ptr(&shared) as *const WorkerShared as *mut std::ffi::c_void;
+            let respond_handle =
+                Arc::as_ptr(&shared) as *const WorkerShared as *mut std::ffi::c_void;
 
             for data in &pending_owned {
                 if let Some(work) = iface.work {
@@ -1598,6 +1600,7 @@ pub struct Instance {
     worker_runtime: Option<WorkerRuntime>,
     _urid: Arc<UridMap>,
     midi_urid: u32,
+    sample_rate: f64,
     min_block: usize,
     max_block: usize,
     port_counts: PortCounts,
@@ -1618,11 +1621,23 @@ pub struct UiInstance {
     handle: lv2_sys::LV2UI_Handle,
     widget: lv2_sys::LV2UI_Widget,
     descriptor: *const lv2_sys::LV2UI_Descriptor,
+    controller: *mut UiWriteController,
+    idle: Option<unsafe extern "C" fn(lv2_sys::LV2UI_Handle) -> ::std::os::raw::c_int>,
     _library: libloading::Library,
 }
 
-// UiInstance is Send because it's just FFI handles
+/// Opaque controller passed as LV2UI_Controller for ui_write_cb.
+/// Holds a map of control input port indices to their float buffers
+/// so the UI callback can write parameter changes directly.
+struct UiWriteController {
+    control_inputs: HashMap<u32, *mut f32>,
+}
+
+// UiInstance is Send + Sync because it's just FFI handles; the
+// underlying LV2 functions (port_event, idle) are expected to be
+// safe to call from any thread per the LV2 UI extension spec.
 unsafe impl Send for UiInstance {}
+unsafe impl Sync for UiInstance {}
 
 impl UiInstance {
     /// The native widget handle (X11 Window, GtkWidget*, etc.).
@@ -1631,10 +1646,23 @@ impl UiInstance {
     }
 
     /// Send a port event to the UI.
-    pub fn port_event(&self, port_index: u32, buffer_size: u32, protocol: u32, buffer: *const c_void) {
+    pub fn port_event(
+        &self,
+        port_index: u32,
+        buffer_size: u32,
+        protocol: u32,
+        buffer: *const c_void,
+    ) {
         if let Some(port_event) = unsafe { (*self.descriptor).port_event } {
             unsafe { port_event(self.handle, port_index, buffer_size, protocol, buffer) };
         }
+    }
+
+    /// Process one iteration of the UI's idle loop (if supported).
+    /// Returns `None` if idle interface is not available, `Some(0)` if ok,
+    /// `Some(non-zero)` if the UI wants to close.
+    pub fn idle(&self) -> Option<i32> {
+        self.idle.map(|f| unsafe { f(self.handle) })
     }
 
     /// Destroy the UI (calls cleanup and drops the library).
@@ -1647,6 +1675,9 @@ impl Drop for UiInstance {
     fn drop(&mut self) {
         if let Some(cleanup) = unsafe { (*self.descriptor).cleanup } {
             unsafe { cleanup(self.handle) };
+        }
+        if !self.controller.is_null() {
+            unsafe { drop(Box::from_raw(self.controller)) };
         }
     }
 }
@@ -1895,6 +1926,15 @@ impl Instance {
         None
     }
 
+    /// Read a control input value by its port index.
+    pub fn control_input(&self, index: PortIndex) -> Option<f32> {
+        let &buf_idx = self.control_input_map.get(&index.0)?;
+        match &self.buffers[buf_idx] {
+            PortBuffer::Control(v) => Some(**v),
+            _ => None,
+        }
+    }
+
     /// Read a control output value by its port index (matching livi's
     /// `instance.control_output(index)`).
     pub fn control_output(&self, index: PortIndex) -> Option<f32> {
@@ -1902,6 +1942,24 @@ impl Instance {
         match &self.buffers[buf_idx] {
             PortBuffer::Control(v) => Some(**v),
             _ => None,
+        }
+    }
+
+    /// Forward all control port values (inputs and outputs) to a UI instance
+    /// via `port_event`.  The host should call this after each `run()` cycle
+    /// so the UI reflects the current state of all control ports.
+    pub fn update_ui(&self, ui: &UiInstance) {
+        const FLOAT_PROTOCOL: u32 = 0;
+        for (port, buf) in self.ports.iter().zip(self.buffers.iter()) {
+            if let PortBuffer::Control(v) = buf {
+                let value = **v;
+                ui.port_event(
+                    port.index,
+                    4,
+                    FLOAT_PROTOCOL,
+                    &value as *const f32 as *const c_void,
+                );
+            }
         }
     }
 
@@ -1986,11 +2044,20 @@ impl Instance {
         !self.uis.is_empty()
     }
 
-    /// Open the first discoverable UI for this plugin.
+    /// Open the first discoverable UI for this plugin with no parent window.
     pub fn open_editor(&self) -> Result<UiInstance, Error> {
-        let ui = self.uis.first().ok_or_else(|| {
-            Error::PluginNotFound(self.plugin_uri.clone())
-        })?;
+        self.open_editor_with_parent(0)
+    }
+
+    /// Open the first discoverable UI for this plugin.
+    ///
+    /// When `parent_window` is non-zero, it is passed as the LV2_UI__parent
+    /// feature (embedded mode).  When zero, uses ui:showInterface (floating).
+    pub fn open_editor_with_parent(&self, parent_window: usize) -> Result<UiInstance, Error> {
+        let ui = self
+            .uis
+            .first()
+            .ok_or_else(|| Error::PluginNotFound(self.plugin_uri.clone()))?;
 
         let library = unsafe { libloading::Library::new(&ui.binary_path) }
             .map_err(|e| Error::Library(e.to_string()))?;
@@ -2013,16 +2080,12 @@ impl Instance {
                     if !first.is_null() {
                         break first;
                     }
-                    return Err(Error::Library(
-                        "no matching LV2UI_Descriptor found".into(),
-                    ));
+                    return Err(Error::Library("no matching LV2UI_Descriptor found".into()));
                 }
                 if first.is_null() {
                     first = d;
                 }
-                let desc_uri =
-                    unsafe { std::ffi::CStr::from_ptr((*d).URI) }
-                        .to_bytes();
+                let desc_uri = unsafe { std::ffi::CStr::from_ptr((*d).URI) }.to_bytes();
                 // Try matching UI URI first, then plugin URI as fallback
                 if (!ui.uri.is_empty() && desc_uri == ui.uri.as_bytes())
                     || (ui.uri.is_empty() && desc_uri == self.plugin_uri.as_bytes())
@@ -2042,6 +2105,9 @@ impl Instance {
         let urid_handle = Arc::as_ptr(&self._urid) as *mut c_void;
         let map_uri_c = CString::new(uris::URID_MAP).unwrap();
         let unmap_uri_c = CString::new(uris::URID_UNMAP).unwrap();
+        let parent_uri_c = CString::new(uris::UI_PARENT).unwrap();
+        let show_ui_c = CString::new(uris::UI_SHOW_INTERFACE).unwrap();
+        let opt_uri_c = CString::new(uris::OPTIONS_OPTIONS).unwrap();
         let urid_map = lv2_sys::LV2_URID_Map {
             handle: urid_handle,
             map: Some(urid_map_cb),
@@ -2050,7 +2116,31 @@ impl Instance {
             handle: urid_handle,
             unmap: Some(urid_unmap_cb),
         };
-        let ui_features = vec![
+
+        let sample_rate_f32: f32 = self.sample_rate as f32;
+        let sample_rate_val = &sample_rate_f32 as *const f32 as *mut c_void;
+        let atom_float = self._urid.map(uris::ATOM_FLOAT);
+        let sr_urid = self._urid.map(uris::PARAM_SAMPLE_RATE);
+        let ui_options = vec![
+            lv2_sys::LV2_Options_Option {
+                context: 0,
+                subject: 0,
+                key: sr_urid,
+                size: 4,
+                type_: atom_float,
+                value: sample_rate_val,
+            },
+            lv2_sys::LV2_Options_Option {
+                context: 0,
+                subject: 0,
+                key: 0,
+                size: 0,
+                type_: 0,
+                value: std::ptr::null(),
+            },
+        ];
+
+        let mut ui_features = vec![
             lv2_sys::LV2_Feature {
                 URI: map_uri_c.as_ptr(),
                 data: &urid_map as *const lv2_sys::LV2_URID_Map as *mut c_void,
@@ -2059,38 +2149,134 @@ impl Instance {
                 URI: unmap_uri_c.as_ptr(),
                 data: &urid_unmap as *const lv2_sys::LV2_URID_Unmap as *mut c_void,
             },
+            lv2_sys::LV2_Feature {
+                URI: opt_uri_c.as_ptr(),
+                data: ui_options.as_ptr() as *mut c_void,
+            },
         ];
+        if parent_window != 0 {
+            ui_features.push(lv2_sys::LV2_Feature {
+                URI: parent_uri_c.as_ptr(),
+                data: parent_window as *mut c_void,
+            });
+        } else {
+            ui_features.push(lv2_sys::LV2_Feature {
+                URI: show_ui_c.as_ptr(),
+                data: std::ptr::null_mut(),
+            });
+        }
         let mut ui_feature_ptrs: Vec<*const lv2_sys::LV2_Feature> = ui_features
             .iter()
             .map(|f| f as *const lv2_sys::LV2_Feature)
             .collect();
         ui_feature_ptrs.push(std::ptr::null());
 
+        unsafe extern "C" fn ui_write_cb(
+            controller: lv2_sys::LV2UI_Controller,
+            port_index: u32,
+            buffer_size: u32,
+            port_protocol: u32,
+            buffer: *const std::ffi::c_void,
+        ) {
+            let ctrl = unsafe { &*(controller as *const UiWriteController) };
+            if port_protocol == 0 && buffer_size == 4 && !buffer.is_null() {
+                let value = unsafe { *(buffer as *const f32) };
+                if let Some(&ptr) = ctrl.control_inputs.get(&port_index) {
+                    unsafe { *ptr = value };
+                }
+            }
+        }
+
         let mut widget: lv2_sys::LV2UI_Widget = std::ptr::null_mut();
 
         let instantiate = unsafe { (*descriptor).instantiate }
             .ok_or_else(|| Error::Instantiation(self.plugin_uri.clone()))?;
+
+        // for ui_write_cb to be able to forward parameter changes to the plugin instance.
+        let mut control_inputs = HashMap::new();
+        for (&port_idx, &buf_idx) in &self.control_input_map {
+            if let PortBuffer::Control(v) = &self.buffers[buf_idx] {
+                control_inputs.insert(port_idx, &**v as *const f32 as *mut f32);
+            }
+        }
+        let ui_ctrl = Box::into_raw(Box::new(UiWriteController { control_inputs }));
+        let controller = ui_ctrl as *mut std::ffi::c_void;
 
         let handle = unsafe {
             instantiate(
                 descriptor,
                 plugin_uri_c.as_ptr(),
                 bundle_c.as_ptr(),
-                None,
-                std::ptr::null_mut(),
+                Some(ui_write_cb),
+                controller,
                 &mut widget,
                 ui_feature_ptrs.as_ptr(),
             )
         };
 
         if handle.is_null() {
+            unsafe { drop(Box::from_raw(ui_ctrl)) };
             return Err(Error::Instantiation(self.plugin_uri.clone()));
+        }
+
+        // Call show() via the showInterface extension to display the UI
+        // in floating mode (no parent window).
+        if parent_window == 0 {
+            let show_ext_uri = CString::new(uris::UI_SHOW_INTERFACE).expect("valid CString");
+            if let Some(ext_data) = unsafe { (*descriptor).extension_data } {
+                let iface_ptr = unsafe { ext_data(show_ext_uri.as_ptr()) };
+                if !iface_ptr.is_null() {
+                    let show_iface =
+                        unsafe { &*(iface_ptr as *const lv2_sys::LV2UI_Show_Interface) };
+                    if let Some(show) = show_iface.show {
+                        unsafe { show(handle) };
+                    }
+                }
+            }
+        }
+
+        // Query the idle interface (ui:idleInterface) for periodic pumping.
+        let idle_ext_uri = CString::new(uris::UI_IDLE_INTERFACE).expect("valid CString");
+        let idle = unsafe { (*descriptor).extension_data }.and_then(|ext_data| {
+            let ptr = unsafe { ext_data(idle_ext_uri.as_ptr()) };
+            if ptr.is_null() {
+                None
+            } else {
+                let iface = unsafe { &*(ptr as *const lv2_sys::LV2UI_Idle_Interface) };
+                iface.idle
+            }
+        });
+        if idle.is_some() {
+            eprintln!("[yeli debug] ui:idleInterface available");
+        } else {
+            eprintln!("[yeli debug] ui:idleInterface NOT available");
+        }
+
+        // Forward initial control port values to the UI so it shows the
+        // current state (levels, knob positions, etc.) immediately.
+        if let Some(port_event_fn) = unsafe { (*descriptor).port_event } {
+            for (port, buf) in self.ports.iter().zip(self.buffers.iter()) {
+                if let PortBuffer::Control(v) = buf {
+                    let value = **v;
+                    unsafe {
+                        port_event_fn(
+                            handle,
+                            port.index,
+                            4,
+                            0,
+                            &value as *const f32 as *const c_void,
+                        )
+                    };
+                }
+            }
         }
 
         Ok(UiInstance {
             handle,
             widget,
             descriptor,
+            controller: ui_ctrl,
+            idle,
             _library: library,
         })
     }
