@@ -85,7 +85,7 @@ pub struct PortCounts {
     pub cv_outputs: usize,
 }
 
-/// Combined port type (direction + data kind), matching livi's `PortType`.
+/// Combined port type (direction + data kind).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PortType {
     ControlInput,
@@ -97,6 +97,10 @@ pub enum PortType {
     CVInput,
     CVOutput,
 }
+
+/// The index of a port within a plugin.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PortIndex(pub u32);
 
 #[derive(Debug)]
 pub enum Error {
@@ -363,7 +367,7 @@ pub struct Port {
 }
 
 impl Port {
-    /// Return the combined `PortType` (direction + kind), matching livi's enum.
+    /// Return the combined `PortType` (direction + kind).
     pub fn port_type(&self) -> PortType {
         match (self.direction, self.kind) {
             (PortDirection::Input, PortKind::Control) => PortType::ControlInput,
@@ -742,6 +746,7 @@ impl World {
         let mut atom_input_indices = Vec::new();
         let mut atom_output_indices = Vec::new();
         let mut control_input_map = HashMap::new();
+        let mut control_output_map = HashMap::new();
 
         for (buf_idx, port) in plugin.ports.iter().enumerate() {
             match port.port_type() {
@@ -751,6 +756,9 @@ impl World {
                 PortType::AtomSequenceOutput => atom_output_indices.push(port.index),
                 PortType::ControlInput => {
                     control_input_map.insert(port.index, buf_idx);
+                }
+                PortType::ControlOutput => {
+                    control_output_map.insert(port.index, buf_idx);
                 }
                 _ => {}
             }
@@ -775,6 +783,7 @@ impl World {
             atom_input_indices,
             atom_output_indices,
             control_input_map,
+            control_output_map,
             _library: library,
         })
     }
@@ -1304,6 +1313,7 @@ pub struct Instance {
     atom_input_indices: Vec<u32>,
     atom_output_indices: Vec<u32>,
     control_input_map: HashMap<u32, usize>,
+    control_output_map: HashMap<u32, usize>,
     _library: libloading::Library,
 }
 
@@ -1496,12 +1506,11 @@ impl Instance {
         ))
     }
 
-    /// Set a control input by its port index (matching livi's
-    /// `instance.set_control_input(index, value)`).
+    /// Set a control input by its port index.
     ///
     /// Returns the clamped value that was actually written.
-    pub fn set_control_input(&mut self, index: u32, value: f32) -> Option<f32> {
-        let &buf_idx = self.control_input_map.get(&index)?;
+    pub fn set_control_input(&mut self, index: PortIndex, value: f32) -> Option<f32> {
+        let &buf_idx = self.control_input_map.get(&index.0)?;
         match &mut self.buffers[buf_idx] {
             PortBuffer::Control(v) => {
                 let port = &self.ports[buf_idx];
@@ -1538,6 +1547,16 @@ impl Instance {
             }
         }
         None
+    }
+
+    /// Read a control output value by its port index (matching livi's
+    /// `instance.control_output(index)`).
+    pub fn control_output(&self, index: PortIndex) -> Option<f32> {
+        let &buf_idx = self.control_output_map.get(&index.0)?;
+        match &self.buffers[buf_idx] {
+            PortBuffer::Control(v) => Some(**v),
+            _ => None,
+        }
     }
 
     /// Iterate over all control ports and their values.
