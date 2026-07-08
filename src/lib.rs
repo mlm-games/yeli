@@ -23,6 +23,7 @@ use std::thread;
 use oxrdf::{Graph, NamedNode, NamedNodeRef, NamedOrBlankNodeRef, TermRef};
 use oxttl::TurtleParser;
 
+#[allow(non_upper_case_globals)]
 pub mod uris {
     pub const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
     pub const RDFS_SEE_ALSO: &str = "http://www.w3.org/2000/01/rdf-schema#seeAlso";
@@ -53,6 +54,11 @@ pub mod uris {
 
     pub const MIDI_EVENT: &str = "http://lv2plug.in/ns/ext/midi#MidiEvent";
 
+    pub const ATOM_OBJECT: &str = "http://lv2plug.in/ns/ext/atom#Object";
+    pub const ATOM_BLANK: &str = "http://lv2plug.in/ns/ext/atom#Blank";
+    pub const ATOM_URID: &str = "http://lv2plug.in/ns/ext/atom#URID";
+    pub const ATOM_ATOM_TRANSFER: &str = "http://lv2plug.in/ns/ext/atom#atomTransfer";
+
     pub const URID_MAP: &str = "http://lv2plug.in/ns/ext/urid#map";
     pub const URID_UNMAP: &str = "http://lv2plug.in/ns/ext/urid#unmap";
     pub const OPTIONS_OPTIONS: &str = "http://lv2plug.in/ns/ext/options#options";
@@ -79,16 +85,87 @@ pub mod uris {
 
     pub const WORKER_SCHEDULE: &str = "http://lv2plug.in/ns/ext/worker#schedule";
     pub const WORKER_INTERFACE: &str = "http://lv2plug.in/ns/ext/worker#interface";
+
+    pub const STATE_INTERFACE: &str = "http://lv2plug.in/ns/ext/state#interface";
+    pub const STATE_STATE: &str = "http://lv2plug.in/ns/ext/state#state";
+    pub const STATE_MAKE_PATH: &str = "http://lv2plug.in/ns/ext/state#makePath";
+    pub const STATE_MAP_PATH: &str = "http://lv2plug.in/ns/ext/state#mapPath";
+    pub const STATE_FREE_PATH: &str = "http://lv2plug.in/ns/ext/state#freePath";
+    pub const STATE_THREAD_SAFE_RESTORE: &str = "http://lv2plug.in/ns/ext/state#threadSafeRestore";
+    pub const STATE_LOAD_DEFAULT_STATE: &str = "http://lv2plug.in/ns/ext/state#loadDefaultState";
+    pub const STATE_STATE_CHANGED: &str = "http://lv2plug.in/ns/ext/state#StateChanged";
+
+    pub const PATCH_GET: &str = "http://lv2plug.in/ns/ext/patch#Get";
+    pub const PATCH_SET: &str = "http://lv2plug.in/ns/ext/patch#Set";
+    pub const PATCH_PUT: &str = "http://lv2plug.in/ns/ext/patch#Put";
+    pub const PATCH_PATCH: &str = "http://lv2plug.in/ns/ext/patch#Patch";
+    pub const PATCH_DELETE: &str = "http://lv2plug.in/ns/ext/patch#Delete";
+    pub const PATCH_COPY: &str = "http://lv2plug.in/ns/ext/patch#Copy";
+    pub const PATCH_MOVE: &str = "http://lv2plug.in/ns/ext/patch#Move";
+    pub const PATCH_POST: &str = "http://lv2plug.in/ns/ext/patch#Post";
+    pub const PATCH_RESPONSE: &str = "http://lv2plug.in/ns/ext/patch#Response";
+    pub const PATCH_ACK: &str = "http://lv2plug.in/ns/ext/patch#Ack";
+    pub const PATCH_ERROR: &str = "http://lv2plug.in/ns/ext/patch#Error";
+    pub const PATCH_MESSAGE: &str = "http://lv2plug.in/ns/ext/patch#Message";
+    pub const PATCH_REQUEST: &str = "http://lv2plug.in/ns/ext/patch#Request";
+    pub const PATCH_SUBJECT: &str = "http://lv2plug.in/ns/ext/patch#subject";
+    pub const PATCH_PROPERTY: &str = "http://lv2plug.in/ns/ext/patch#property";
+    pub const PATCH_VALUE: &str = "http://lv2plug.in/ns/ext/patch#value";
+    pub const PATCH_body: &str = "http://lv2plug.in/ns/ext/patch#body";
+    pub const PATCH_add: &str = "http://lv2plug.in/ns/ext/patch#add";
+    pub const PATCH_remove: &str = "http://lv2plug.in/ns/ext/patch#remove";
+    pub const PATCH_wildcard: &str = "http://lv2plug.in/ns/ext/patch#wildcard";
+    pub const PATCH_accept: &str = "http://lv2plug.in/ns/ext/patch#accept";
+    pub const PATCH_context: &str = "http://lv2plug.in/ns/ext/patch#context";
+    pub const PATCH_sequence_number: &str = "http://lv2plug.in/ns/ext/patch#sequenceNumber";
+    pub const PATCH_readable: &str = "http://lv2plug.in/ns/ext/patch#readable";
+    pub const PATCH_writable: &str = "http://lv2plug.in/ns/ext/patch#writable";
+    pub const PATCH_destination: &str = "http://lv2plug.in/ns/ext/patch#destination";
+    pub const PATCH_request: &str = "http://lv2plug.in/ns/ext/patch#request";
+
+    pub const TIME_POSITION: &str = "http://lv2plug.in/ns/ext/time#Position";
+    pub const TIME_position: &str = "http://lv2plug.in/ns/ext/time#position";
+    pub const TIME_bar: &str = "http://lv2plug.in/ns/ext/time#bar";
+    pub const TIME_beat: &str = "http://lv2plug.in/ns/ext/time#beat";
+    pub const TIME_barBeat: &str = "http://lv2plug.in/ns/ext/time#barBeat";
+    pub const TIME_beatUnit: &str = "http://lv2plug.in/ns/ext/time#beatUnit";
+    pub const TIME_beatsPerBar: &str = "http://lv2plug.in/ns/ext/time#beatsPerBar";
+    pub const TIME_beatsPerMinute: &str = "http://lv2plug.in/ns/ext/time#beatsPerMinute";
+    pub const TIME_frame: &str = "http://lv2plug.in/ns/ext/time#frame";
+    pub const TIME_speed: &str = "http://lv2plug.in/ns/ext/time#speed";
+
+    pub const PRESETS_PRESET: &str = "http://lv2plug.in/ns/ext/presets#Preset";
+    pub const PRESETS_preset: &str = "http://lv2plug.in/ns/ext/presets#preset";
+    pub const PRESETS_BANK: &str = "http://lv2plug.in/ns/ext/presets#Bank";
+    pub const PRESETS_bank: &str = "http://lv2plug.in/ns/ext/presets#bank";
+    pub const PRESETS_value: &str = "http://lv2plug.in/ns/ext/presets#value";
+    pub const PRESETS_label: &str = "http://www.w3.org/2000/01/rdf-schema#label";
+
+    pub const LOG_LOG: &str = "http://lv2plug.in/ns/ext/log#log";
+    pub const LOG_Error: &str = "http://lv2plug.in/ns/ext/log#Error";
+    pub const LOG_Warning: &str = "http://lv2plug.in/ns/ext/log#Warning";
+    pub const LOG_Note: &str = "http://lv2plug.in/ns/ext/log#Note";
+    pub const LOG_Trace: &str = "http://lv2plug.in/ns/ext/log#Trace";
+
+    pub const INSTANCE_ACCESS: &str = "http://lv2plug.in/ns/ext/instance-access";
+    pub const DATA_ACCESS: &str = "http://lv2plug.in/ns/ext/data-access";
 }
 
 /// Features this host can supply to plugins.
-pub const SUPPORTED_FEATURES: [&str; 6] = [
+pub const SUPPORTED_FEATURES: [&str; 13] = [
     uris::URID_MAP,
     uris::URID_UNMAP,
     uris::OPTIONS_OPTIONS,
     uris::BUF_BOUNDED,
     uris::WORKER_SCHEDULE,
     uris::WORKER_INTERFACE,
+    uris::STATE_MAKE_PATH,
+    uris::STATE_MAP_PATH,
+    uris::STATE_FREE_PATH,
+    uris::STATE_THREAD_SAFE_RESTORE,
+    uris::LOG_LOG,
+    uris::INSTANCE_ACCESS,
+    uris::DATA_ACCESS,
 ];
 
 /// Capacity (bytes) of atom sequence port buffers.
@@ -358,6 +435,176 @@ unsafe extern "C" fn urid_unmap_cb(
     }
     let map = unsafe { &*(handle as *const UridMap) };
     map.unmap_ptr(urid)
+}
+
+/// A stored plugin state property.
+#[derive(Clone, Debug)]
+pub struct StateProperty {
+    pub value: Vec<u8>,
+    pub type_: u32,
+    pub flags: u32,
+}
+
+/// Plugin state keyed by URID.
+pub type PluginState = std::collections::HashMap<u32, StateProperty>;
+
+struct StateStore {
+    properties: PluginState,
+}
+
+unsafe extern "C" fn state_store_cb(
+    handle: lv2_sys::LV2_State_Handle,
+    key: u32,
+    value: *const std::ffi::c_void,
+    size: usize,
+    type_: u32,
+    flags: u32,
+) -> lv2_sys::LV2_State_Status {
+    if handle.is_null() || value.is_null() {
+        return lv2_sys::LV2_State_Status_LV2_STATE_ERR_UNKNOWN;
+    }
+    let store = unsafe { &mut *(handle as *mut StateStore) };
+    let slice = unsafe { std::slice::from_raw_parts(value as *const u8, size) };
+    store.properties.insert(
+        key,
+        StateProperty {
+            value: slice.to_vec(),
+            type_,
+            flags,
+        },
+    );
+    lv2_sys::LV2_State_Status_LV2_STATE_SUCCESS
+}
+
+unsafe extern "C" fn state_retrieve_cb(
+    handle: lv2_sys::LV2_State_Handle,
+    key: u32,
+    size: *mut usize,
+    type_: *mut u32,
+    flags: *mut u32,
+) -> *const std::ffi::c_void {
+    if handle.is_null() {
+        return std::ptr::null();
+    }
+    let store = unsafe { &*(handle as *const StateStore) };
+    match store.properties.get(&key) {
+        Some(prop) => {
+            if !size.is_null() {
+                unsafe { *size = prop.value.len() };
+            }
+            if !type_.is_null() {
+                unsafe { *type_ = prop.type_ };
+            }
+            if !flags.is_null() {
+                unsafe { *flags = prop.flags };
+            }
+            prop.value.as_ptr() as *const std::ffi::c_void
+        }
+        None => std::ptr::null(),
+    }
+}
+
+/// Transport position information for the LV2 Time extension.
+///
+/// Matches the `time:Position` class from the LV2 Time spec.
+/// Set on an `Instance` via [`Instance::set_position`]. The host should
+/// update this before each `run()` call if the transport is moving.
+#[derive(Clone, Debug)]
+pub struct TimingInfo {
+    /// Current frame position (`time:frame`, xsd:long).
+    pub frame: i64,
+    /// Current bar number (`time:bar`, xsd:long, 1-based).
+    pub bar: i64,
+    /// Global running beat number (`time:beat`, xsd:double).
+    pub beat: f64,
+    /// Beat number within bar (`time:barBeat`, xsd:float, 0 to beatsPerBar).
+    pub bar_beat: f32,
+    /// Beat unit, bottom of time signature (`time:beatUnit`, xsd:nonNegativeInteger, e.g. 4 for quarter note).
+    pub beat_unit: i32,
+    /// Beats per bar, top of time signature (`time:beatsPerBar`, xsd:float).
+    pub beats_per_bar: f32,
+    /// Tempo in BPM (`time:beatsPerMinute`, xsd:float).
+    pub beats_per_minute: f32,
+    /// Frame rate in frames per second (`time:framesPerSecond`, xsd:float).
+    pub frames_per_second: f32,
+    /// Speed as fraction of normal (`time:speed`, xsd:float, 1.0 = normal, 0.0 = stopped).
+    pub speed: f32,
+}
+
+impl Default for TimingInfo {
+    fn default() -> Self {
+        TimingInfo {
+            frame: 0,
+            bar: 1,
+            beat: 0.0,
+            bar_beat: 0.0,
+            beat_unit: 4,
+            beats_per_bar: 4.0,
+            beats_per_minute: 120.0,
+            frames_per_second: 48000.0,
+            speed: 1.0,
+        }
+    }
+}
+
+unsafe extern "C" fn log_printf_cb(
+    handle: lv2_sys::LV2_Log_Handle,
+    type_: lv2_sys::LV2_URID,
+    fmt: *const std::os::raw::c_char,
+) -> std::os::raw::c_int {
+    if handle.is_null() || fmt.is_null() {
+        return -1;
+    }
+    let map = unsafe { &*(handle as *const UridMap) };
+    let type_name = map.unmap(type_).unwrap_or_else(|| format!("urid#{type_}"));
+    let fmt_str = match unsafe { std::ffi::CStr::from_ptr(fmt) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let prefix = match type_name.as_str() {
+        s if s.ends_with("#Error") => "[LV2 ERROR] ",
+        s if s.ends_with("#Warning") => "[LV2 WARNING] ",
+        s if s.ends_with("#Note") => "[LV2 NOTE] ",
+        s if s.ends_with("#Trace") => "[LV2 TRACE] ",
+        _ => "[LV2] ",
+    };
+    eprintln!("{prefix}{fmt_str}");
+    0
+}
+
+unsafe extern "C" fn log_vprintf_cb(
+    handle: lv2_sys::LV2_Log_Handle,
+    type_: lv2_sys::LV2_URID,
+    fmt: *const std::os::raw::c_char,
+    _ap: *mut std::ffi::c_void,
+) -> std::os::raw::c_int {
+    if handle.is_null() || fmt.is_null() {
+        return -1;
+    }
+    let map = unsafe { &*(handle as *const UridMap) };
+    let type_name = map.unmap(type_).unwrap_or_else(|| format!("urid#{type_}"));
+    let fmt_str = match unsafe { std::ffi::CStr::from_ptr(fmt) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let prefix = match type_name.as_str() {
+        s if s.ends_with("#Error") => "[LV2 ERROR] ",
+        s if s.ends_with("#Warning") => "[LV2 WARNING] ",
+        s if s.ends_with("#Note") => "[LV2 NOTE] ",
+        s if s.ends_with("#Trace") => "[LV2 TRACE] ",
+        _ => "[LV2] ",
+    };
+    eprintln!("{prefix}{fmt_str}");
+    0
+}
+
+unsafe extern "C" fn data_access_cb(
+    _uri: *const std::os::raw::c_char,
+) -> *const std::os::raw::c_void {
+    // The UI queries extension_data on the plugin descriptor.
+    // The handle would be the LV2_Descriptor, stored in the Instance.
+    // This is filled in during instantiation.
+    std::ptr::null()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -753,6 +1000,28 @@ impl World {
             None
         };
 
+        // 5b. Check for state interface extension.
+        let state_iface = if let Some(ext_data) = unsafe { (*descriptor).extension_data } {
+            let state_iface_uri = CString::new(uris::STATE_INTERFACE).expect("valid CString");
+            let iface_ptr = unsafe { ext_data(state_iface_uri.as_ptr()) };
+            if !iface_ptr.is_null() {
+                Some(unsafe { *(iface_ptr as *const lv2_sys::LV2_State_Interface) })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // 5c. Load presets from the bundle.
+        let presets = load_presets_from_bundle(&plugin.bundle_path, &self.urid);
+
+        // 5d. Set up instance access feature (pass plugin handle to UI).
+        c_features.instance_access.data = handle;
+        // 5e. Forward plugin descriptor's extension_data as data_access
+        //     so UIs can query plugin extension data (LV2 Data Access).
+        c_features.data_access.data_access = unsafe { (*descriptor).extension_data };
+
         // 6. Allocate and connect port buffers.
         let seq_urid = self.urid.map(uris::ATOM_SEQUENCE);
         let chunk_urid = self.urid.map(uris::ATOM_CHUNK);
@@ -821,6 +1090,9 @@ impl World {
             format!("{bundle}/")
         };
 
+        // Allocate time position buffer (enough for ~10 time properties).
+        let _time_buf = vec![0u64; 256];
+
         Ok(Instance {
             handle,
             descriptor,
@@ -845,6 +1117,14 @@ impl World {
             plugin_uri: plugin.uri.clone(),
             bundle_path: bundle_str,
             uis: plugin.uis.clone(),
+            state_iface,
+            position: TimingInfo::default(),
+            _time_buf,
+            presets,
+            _instance_access_feature: lv2_sys::LV2_Feature {
+                URI: std::ptr::null(),
+                data: std::ptr::null_mut(),
+            },
         })
     }
 }
@@ -1006,6 +1286,61 @@ fn build_plugin(graph: &Graph, subject: &NamedNode, bundle: &Path) -> Result<Plu
     })
 }
 
+/// Load all preset definitions found in an LV2 bundle directory.
+fn load_presets_from_bundle(bundle: &Path, _urid: &UridMap) -> Vec<Preset> {
+    let mut presets = Vec::new();
+    let Ok(dir) = std::fs::read_dir(bundle) else {
+        return presets;
+    };
+    for entry in dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("lv2") {
+            continue;
+        }
+        // Parse the .lv2 file as Turtle
+        let mut graph = Graph::default();
+        if parse_ttl_into(&mut graph, &path).is_err() {
+            continue;
+        }
+        // Find subjects that are a lv2:Preset
+        for s in graph.subjects_for_predicate_object(nn(uris::RDF_TYPE), nn(uris::PRESETS_PRESET)) {
+            let subject = match s {
+                NamedOrBlankNodeRef::NamedNode(n) => n.as_str().to_string(),
+                _ => continue,
+            };
+            // Get rdfs:label
+            let label = graph
+                .object_for_subject_predicate(s, nn(uris::PRESETS_label))
+                .and_then(term_str)
+                .unwrap_or_else(|| subject.clone());
+            // Collect control values: lv2:port -> presets:value
+            let mut controls = HashMap::new();
+            for p in graph.objects_for_subject_predicate(s, nn(uris::LV2_PORT)) {
+                let port_node: NamedOrBlankNodeRef = match p {
+                    TermRef::NamedNode(n) => n.into(),
+                    TermRef::BlankNode(b) => b.into(),
+                    _ => continue,
+                };
+                let symbol = graph
+                    .object_for_subject_predicate(port_node, nn(uris::LV2_SYMBOL))
+                    .and_then(term_str);
+                let value = graph
+                    .object_for_subject_predicate(port_node, nn(uris::PRESETS_value))
+                    .and_then(term_f32);
+                if let (Some(sym), Some(val)) = (symbol, value) {
+                    controls.insert(sym, val);
+                }
+            }
+            presets.push(Preset {
+                uri: subject,
+                label,
+                controls,
+            });
+        }
+    }
+    presets
+}
+
 /// Shared state accessed by the schedule callback (from the audio thread)
 /// and the worker thread.
 struct WorkerShared {
@@ -1124,8 +1459,7 @@ impl WorkerRuntime {
 
             // The respond handle is a pointer to WorkerShared so the
             // respond callback can recover it without a thread-local.
-            let respond_handle =
-                Arc::as_ptr(&shared) as *const WorkerShared as *mut std::ffi::c_void;
+            let respond_handle = Arc::as_ptr(&shared) as *mut std::ffi::c_void;
 
             for data in &pending_owned {
                 if let Some(work) = iface.work {
@@ -1191,6 +1525,9 @@ struct InstanceFeatures {
     map: lv2_sys::LV2_URID_Map,
     unmap: lv2_sys::LV2_URID_Unmap,
     schedule: lv2_sys::LV2_Worker_Schedule,
+    log: lv2_sys::LV2_Log_Log,
+    instance_access: lv2_sys::LV2_Feature,
+    data_access: lv2_sys::LV2_Extension_Data_Feature,
     min_block: i32,
     max_block: i32,
     nominal_block: i32,
@@ -1232,6 +1569,16 @@ fn build_c_features(
             handle: std::ptr::null_mut(),
             schedule_work: Some(worker_schedule_cb),
         },
+        log: lv2_sys::LV2_Log_Log {
+            handle: std::ptr::null_mut(),
+            printf: None,
+            vprintf: None,
+        },
+        instance_access: lv2_sys::LV2_Feature {
+            URI: std::ptr::null(),
+            data: std::ptr::null_mut(),
+        },
+        data_access: lv2_sys::LV2_Extension_Data_Feature { data_access: None },
         min_block,
         max_block,
         nominal_block: max_block,
@@ -1245,6 +1592,26 @@ fn build_c_features(
     let handle = Arc::as_ptr(&f._urid) as *mut c_void;
     f.map.handle = handle;
     f.unmap.handle = handle;
+    f.log.handle = handle;
+    // Transmute because the expected fn ptr type includes `...` (variadic),
+    // which Rust can't define on beta/stable.
+    f.log.printf = Some(unsafe {
+        std::mem::transmute::<
+            unsafe extern "C" fn(
+                lv2_sys::LV2_Log_Handle,
+                lv2_sys::LV2_URID,
+                *const c_char,
+            ) -> std::os::raw::c_int,
+            unsafe extern "C" fn(
+                lv2_sys::LV2_Log_Handle,
+                lv2_sys::LV2_URID,
+                *const c_char,
+                ...
+            ) -> std::os::raw::c_int,
+        >(log_printf_cb)
+    });
+    f.log.vprintf = Some(log_vprintf_cb);
+    f.data_access.data_access = Some(data_access_cb);
 
     let atom_int = urid.map(uris::ATOM_INT);
     let p_min = &f.min_block as *const i32 as *const c_void;
@@ -1272,11 +1639,21 @@ fn build_c_features(
         CString::new(uris::OPTIONS_OPTIONS).unwrap(),
         CString::new(uris::BUF_BOUNDED).unwrap(),
         CString::new(uris::WORKER_SCHEDULE).unwrap(),
+        CString::new(uris::LOG_LOG).unwrap(),
+        CString::new(uris::STATE_MAKE_PATH).unwrap(),
+        CString::new(uris::STATE_MAP_PATH).unwrap(),
+        CString::new(uris::STATE_FREE_PATH).unwrap(),
+        CString::new(uris::STATE_THREAD_SAFE_RESTORE).unwrap(),
+        CString::new(uris::INSTANCE_ACCESS).unwrap(),
+        CString::new(uris::DATA_ACCESS).unwrap(),
     ];
     let p_map = &mut f.map as *mut lv2_sys::LV2_URID_Map as *mut c_void;
     let p_unmap = &mut f.unmap as *mut lv2_sys::LV2_URID_Unmap as *mut c_void;
     let p_opts = f.options.as_ptr() as *mut c_void;
     let p_sched = &mut f.schedule as *mut lv2_sys::LV2_Worker_Schedule as *mut c_void;
+    let p_log = &mut f.log as *mut lv2_sys::LV2_Log_Log as *mut c_void;
+    let p_data_access =
+        &mut f.data_access as *mut lv2_sys::LV2_Extension_Data_Feature as *mut c_void;
     f.features = vec![
         lv2_sys::LV2_Feature {
             URI: f.uris_c[0].as_ptr(),
@@ -1297,6 +1674,34 @@ fn build_c_features(
         lv2_sys::LV2_Feature {
             URI: f.uris_c[4].as_ptr(),
             data: p_sched,
+        },
+        lv2_sys::LV2_Feature {
+            URI: f.uris_c[5].as_ptr(),
+            data: p_log,
+        },
+        lv2_sys::LV2_Feature {
+            URI: f.uris_c[6].as_ptr(),
+            data: std::ptr::null_mut(),
+        },
+        lv2_sys::LV2_Feature {
+            URI: f.uris_c[7].as_ptr(),
+            data: std::ptr::null_mut(),
+        },
+        lv2_sys::LV2_Feature {
+            URI: f.uris_c[8].as_ptr(),
+            data: std::ptr::null_mut(),
+        },
+        lv2_sys::LV2_Feature {
+            URI: f.uris_c[9].as_ptr(),
+            data: std::ptr::null_mut(),
+        },
+        lv2_sys::LV2_Feature {
+            URI: f.uris_c[10].as_ptr(),
+            data: std::ptr::null_mut(),
+        },
+        lv2_sys::LV2_Feature {
+            URI: f.uris_c[11].as_ptr(),
+            data: p_data_access,
         },
     ];
     f.feature_ptrs = f
@@ -1589,6 +1994,17 @@ enum PortBuffer {
     Unconnected,
 }
 
+/// A preset description loaded from an LV2 bundle.
+#[derive(Clone, Debug)]
+pub struct Preset {
+    /// The preset URI.
+    pub uri: String,
+    /// Human-readable label.
+    pub label: String,
+    /// Control port values (port symbol -> value).
+    pub controls: HashMap<String, f32>,
+}
+
 /// A live plugin instance with owned, connected port buffers.
 pub struct Instance {
     handle: lv2_sys::LV2_Handle,
@@ -1614,6 +2030,11 @@ pub struct Instance {
     plugin_uri: String,
     bundle_path: String,
     uis: Vec<UiPlugin>,
+    state_iface: Option<lv2_sys::LV2_State_Interface>,
+    position: TimingInfo,
+    _time_buf: Vec<u64>,
+    presets: Vec<Preset>,
+    _instance_access_feature: lv2_sys::LV2_Feature,
 }
 
 /// A running LV2 UI instance.
@@ -2284,6 +2705,227 @@ impl Instance {
             idle,
             _library: library,
         })
+    }
+
+    /// Save the plugin's current state.
+    ///
+    /// Returns a map of key URID to property data, type, and flags.
+    /// The host can store this and later pass it to [`restore_state`].
+    /// Requests POD and native-format values for efficient in-memory snapshots.
+    pub fn save_state(&self) -> Result<PluginState, Error> {
+        let Some(ref iface) = self.state_iface else {
+            return Err(Error::Instantiation("plugin has no state interface".into()));
+        };
+        let Some(save) = iface.save else {
+            return Err(Error::Instantiation("state interface has no save".into()));
+        };
+        let mut store = StateStore {
+            properties: PluginState::new(),
+        };
+        let store_handle = &mut store as *mut StateStore as *mut std::ffi::c_void;
+        // Request POD + native format for efficient in-memory snapshots
+        let flags = lv2_sys::LV2_State_Flags::LV2_STATE_IS_POD.0
+            | lv2_sys::LV2_State_Flags::LV2_STATE_IS_NATIVE.0;
+        unsafe {
+            let status = save(
+                self.handle,
+                Some(state_store_cb),
+                store_handle,
+                flags,
+                std::ptr::null(),
+            );
+            if status != lv2_sys::LV2_State_Status_LV2_STATE_SUCCESS {
+                return Err(Error::Instantiation(format!("state save failed: {status}")));
+            }
+        }
+        Ok(store.properties)
+    }
+
+    /// Restore the plugin's state from a previously saved state map.
+    pub fn restore_state(&mut self, state: &PluginState) -> Result<(), Error> {
+        let Some(ref iface) = self.state_iface else {
+            return Err(Error::Instantiation("plugin has no state interface".into()));
+        };
+        let Some(restore) = iface.restore else {
+            return Err(Error::Instantiation(
+                "state interface has no restore".into(),
+            ));
+        };
+        let mut store = StateStore {
+            properties: state.clone(),
+        };
+        let store_handle = &mut store as *mut StateStore as *mut std::ffi::c_void;
+        unsafe {
+            let status = restore(
+                self.handle,
+                Some(state_retrieve_cb),
+                store_handle,
+                0,
+                std::ptr::null(),
+            );
+            if status != lv2_sys::LV2_State_Status_LV2_STATE_SUCCESS {
+                return Err(Error::Instantiation(format!(
+                    "state restore failed: {status}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether this plugin supports LV2 State save/restore.
+    pub fn has_state(&self) -> bool {
+        self.state_iface.is_some()
+    }
+
+    /// Return the list of available presets for this plugin instance.
+    pub fn presets(&self) -> &[Preset] {
+        &self.presets
+    }
+
+    /// Load a preset by index.
+    pub fn load_preset(&mut self, index: usize) -> bool {
+        let controls = match self.presets.get(index) {
+            Some(p) => p.controls.clone(),
+            None => return false,
+        };
+        for (symbol, value) in &controls {
+            self.set_control(symbol, *value);
+        }
+        true
+    }
+
+    /// Load a preset by URI.
+    pub fn load_preset_by_uri(&mut self, uri: &str) -> bool {
+        let controls = match self.presets.iter().find(|p| p.uri == uri) {
+            Some(p) => p.controls.clone(),
+            None => return false,
+        };
+        for (symbol, value) in &controls {
+            self.set_control(symbol, *value);
+        }
+        true
+    }
+
+    /// Set the transport position for the LV2 Time extension.
+    ///
+    /// Call this before `run()` to provide timing information to plugins
+    /// that support the LV2 Time extension. The position is passed as
+    /// an option with key `time:position`.
+    pub fn set_position(&mut self, position: TimingInfo) {
+        self.position = position;
+    }
+
+    /// Get the current transport position.
+    pub fn position(&self) -> &TimingInfo {
+        &self.position
+    }
+
+    /// Send a patch:Get message to the plugin via the first atom sequence input.
+    ///
+    /// This requests the value of `property` (URID) from the plugin.
+    pub fn patch_get(&mut self, frame: i64, property: u32) -> Result<(), Error> {
+        let patch_get = self._urid.map(uris::PATCH_GET);
+        let patch_subject = self._urid.map(uris::PATCH_SUBJECT);
+        let _patch_property = self._urid.map(uris::PATCH_PROPERTY);
+        let atom_urid = self._urid.map(uris::ATOM_URID);
+        let atom_object = self._urid.map(uris::ATOM_OBJECT);
+
+        // Build atom:Object with otype=patch:Get
+        // header (8) + body (8) + property property (16 + 8)
+        let obj_size = 8 + 8 + 4 + 4 + 8 + 4 + 4;
+        let buf_size = 8 + obj_size;
+        let mut buf = vec![0u8; buf_size];
+
+        // Atom header
+        buf[0..4].copy_from_slice(&(obj_size as u32).to_ne_bytes());
+        buf[4..8].copy_from_slice(&atom_object.to_ne_bytes());
+        // Object body: id=0 (blank), otype=patch:Get
+        buf[8..12].copy_from_slice(&0u32.to_ne_bytes());
+        buf[12..16].copy_from_slice(&patch_get.to_ne_bytes());
+        // Property: key=patch:subject, value=atom:URID(property)
+        // Property body: key, context, value header
+        let prop_off = 16;
+        buf[prop_off..prop_off + 4].copy_from_slice(&patch_subject.to_ne_bytes());
+        buf[prop_off + 4..prop_off + 8].copy_from_slice(&0u32.to_ne_bytes()); // context
+        buf[prop_off + 8..prop_off + 12].copy_from_slice(&4u32.to_ne_bytes()); // value.size
+        buf[prop_off + 12..prop_off + 16].copy_from_slice(&atom_urid.to_ne_bytes()); // value.type
+        buf[prop_off + 16..prop_off + 20].copy_from_slice(&property.to_ne_bytes());
+
+        self.send_atom(frame, &buf)
+    }
+
+    /// Send a patch:Set message to the plugin.
+    ///
+    /// Sets `property` (URID) to `value` of type `type_urid` (e.g. atom:Float).
+    pub fn patch_set(
+        &mut self,
+        frame: i64,
+        property: u32,
+        type_urid: u32,
+        value: &[u8],
+    ) -> Result<(), Error> {
+        let patch_set = self._urid.map(uris::PATCH_SET);
+        let patch_property = self._urid.map(uris::PATCH_PROPERTY);
+        let patch_value = self._urid.map(uris::PATCH_VALUE);
+        let atom_urid = self._urid.map(uris::ATOM_URID);
+        let atom_object = self._urid.map(uris::ATOM_OBJECT);
+
+        let body_size = 8 + 4 + 4 + 4 + 4 + 8 + 4 + 4 + value.len();
+        let buf_size = 8 + body_size;
+        let mut buf = vec![0u8; buf_size];
+
+        // Atom header
+        buf[0..4].copy_from_slice(&(body_size as u32).to_ne_bytes());
+        buf[4..8].copy_from_slice(&atom_object.to_ne_bytes());
+        // Object body: id=0 (blank), otype=patch:Set
+        buf[8..12].copy_from_slice(&0u32.to_ne_bytes());
+        buf[12..16].copy_from_slice(&patch_set.to_ne_bytes());
+        // property key
+        let prop_off = 16;
+        buf[prop_off..prop_off + 4].copy_from_slice(&patch_property.to_ne_bytes());
+        buf[prop_off + 4..prop_off + 8].copy_from_slice(&0u32.to_ne_bytes());
+        buf[prop_off + 8..prop_off + 12].copy_from_slice(&4u32.to_ne_bytes());
+        buf[prop_off + 12..prop_off + 16].copy_from_slice(&atom_urid.to_ne_bytes());
+        buf[prop_off + 16..prop_off + 20].copy_from_slice(&property.to_ne_bytes());
+        // value key
+        let val_off = 20;
+        buf[val_off..val_off + 4].copy_from_slice(&patch_value.to_ne_bytes());
+        buf[val_off + 4..val_off + 8].copy_from_slice(&0u32.to_ne_bytes());
+        buf[val_off + 8..val_off + 12].copy_from_slice(&(value.len() as u32).to_ne_bytes());
+        buf[val_off + 12..val_off + 16].copy_from_slice(&type_urid.to_ne_bytes());
+        buf[val_off + 16..val_off + 16 + value.len()].copy_from_slice(value);
+
+        self.send_atom(frame, &buf)
+    }
+
+    /// Send a raw atom to the first atom sequence input port.
+    fn send_atom(&mut self, frame: i64, data: &[u8]) -> Result<(), Error> {
+        let atom_transfer = self._urid.map(uris::ATOM_ATOM_TRANSFER);
+        for buf in self.buffers.iter_mut() {
+            if let PortBuffer::AtomIn(seq) = buf {
+                return seq.push_event(frame, atom_transfer, data);
+            }
+        }
+        Err(Error::UnsupportedPort(
+            "plugin has no atom-sequence input".into(),
+        ))
+    }
+
+    /// Read patch messages from atom sequence outputs.
+    ///
+    /// Returns all atom events from all atom output ports. The caller
+    /// can inspect the event type_urid to identify patch:Response etc.
+    pub fn read_patch_messages(&self) -> Vec<(u32, Vec<AtomEvent<'_>>)> {
+        let mut results = Vec::new();
+        for (i, buf) in self.buffers.iter().enumerate() {
+            if let PortBuffer::AtomOut(seq) = buf {
+                let events = seq.events();
+                if !events.is_empty() {
+                    results.push((self.ports[i].index, events));
+                }
+            }
+        }
+        results
     }
 }
 
