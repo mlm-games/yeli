@@ -14,10 +14,10 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_void};
 use std::fmt;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
@@ -52,6 +52,7 @@ pub mod uris {
     pub const ATOM_SEQUENCE: &str = "http://lv2plug.in/ns/ext/atom#Sequence";
     pub const ATOM_CHUNK: &str = "http://lv2plug.in/ns/ext/atom#Chunk";
     pub const ATOM_INT: &str = "http://lv2plug.in/ns/ext/atom#Int";
+    pub const ATOM_SUPPORTS: &str = "http://lv2plug.in/ns/ext/atom#supports";
 
     pub const MIDI_EVENT: &str = "http://lv2plug.in/ns/ext/midi#MidiEvent";
 
@@ -88,6 +89,14 @@ pub mod uris {
     pub const PARAM_SAMPLE_RATE: &str = "http://lv2plug.in/ns/ext/parameters#sampleRate";
     pub const ATOM_DOUBLE: &str = "http://lv2plug.in/ns/ext/atom#Double";
     pub const ATOM_FLOAT: &str = "http://lv2plug.in/ns/ext/atom#Float";
+
+    pub const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+    pub const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#int";
+    pub const XSD_LONG: &str = "http://www.w3.org/2001/XMLSchema#long";
+    pub const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+    pub const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
+    pub const XSD_FLOAT: &str = "http://www.w3.org/2001/XMLSchema#float";
+    pub const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 
     pub const WORKER_SCHEDULE: &str = "http://lv2plug.in/ns/ext/worker#schedule";
     pub const WORKER_INTERFACE: &str = "http://lv2plug.in/ns/ext/worker#interface";
@@ -557,55 +566,82 @@ impl Default for TimingInfo {
     }
 }
 
-unsafe extern "C" fn log_printf_cb(
-    handle: lv2_sys::LV2_Log_Handle,
-    type_: lv2_sys::LV2_URID,
-    fmt: *const std::os::raw::c_char,
-) -> std::os::raw::c_int {
-    if handle.is_null() || fmt.is_null() {
-        return -1;
-    }
-    let map = unsafe { &*(handle as *const UridMap) };
-    let type_name = map.unmap(type_).unwrap_or_else(|| format!("urid#{type_}"));
-    let fmt_str = match unsafe { std::ffi::CStr::from_ptr(fmt) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-    let prefix = match type_name.as_str() {
+fn log_prefix(type_name: &str) -> &'static str {
+    match type_name {
         s if s.ends_with("#Error") => "[LV2 ERROR] ",
         s if s.ends_with("#Warning") => "[LV2 WARNING] ",
         s if s.ends_with("#Note") => "[LV2 NOTE] ",
         s if s.ends_with("#Trace") => "[LV2 TRACE] ",
         _ => "[LV2] ",
-    };
-    eprintln!("{prefix}{fmt_str}");
-    0
+    }
+}
+
+/// Format a C `va_list` message with vsnprintf.
+/// va_list on x86_64 Linux is just a pointer; we receive it as `*mut c_void`.
+#[cfg(unix)]
+unsafe fn vformat(fmt: *const c_char, ap: *mut c_void) -> Option<String> {
+    unsafe extern "C" {
+        fn vsnprintf(s: *mut c_char, n: libc::size_t, format: *const c_char, ap: *mut c_void) -> libc::c_int;
+    }
+    let mut buf = vec![0u8; 4096];
+    let n = unsafe { vsnprintf(buf.as_mut_ptr() as *mut c_char, buf.len(), fmt, ap) };
+    if n < 0 {
+        return None;
+    }
+    let end = (n as usize).min(buf.len() - 1);
+    Some(String::from_utf8_lossy(&buf[..end]).into_owned())
+}
+
+#[cfg(not(unix))]
+unsafe fn vformat(fmt: *const c_char, _ap: *mut c_void) -> Option<String> {
+    unsafe { CStr::from_ptr(fmt) }.to_str().ok().map(str::to_owned)
 }
 
 unsafe extern "C" fn log_vprintf_cb(
     handle: lv2_sys::LV2_Log_Handle,
     type_: lv2_sys::LV2_URID,
-    fmt: *const std::os::raw::c_char,
-    _ap: *mut std::ffi::c_void,
+    fmt: *const c_char,
+    ap: *mut c_void,
 ) -> std::os::raw::c_int {
     if handle.is_null() || fmt.is_null() {
         return -1;
     }
     let map = unsafe { &*(handle as *const UridMap) };
     let type_name = map.unmap(type_).unwrap_or_else(|| format!("urid#{type_}"));
-    let fmt_str = match unsafe { std::ffi::CStr::from_ptr(fmt) }.to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-    let prefix = match type_name.as_str() {
-        s if s.ends_with("#Error") => "[LV2 ERROR] ",
-        s if s.ends_with("#Warning") => "[LV2 WARNING] ",
-        s if s.ends_with("#Note") => "[LV2 NOTE] ",
-        s if s.ends_with("#Trace") => "[LV2 TRACE] ",
-        _ => "[LV2] ",
-    };
-    eprintln!("{prefix}{fmt_str}");
-    0
+    match unsafe { vformat(fmt, ap) } {
+        Some(msg) => {
+            eprint!("{}{}", log_prefix(&type_name), msg);
+            if !msg.ends_with('\n') {
+                eprintln!();
+            }
+            msg.len() as std::os::raw::c_int
+        }
+        None => -1,
+    }
+}
+
+/// Non-variadic body installed behind a variadic signature (see
+/// build_c_features). Rust cannot receive C varargs, so this prints the
+/// raw format string. Plugins using log:log with format arguments should
+/// prefer vprintf; most `lv2_log_*` convenience wrappers route through
+/// vprintf on the plugin side anyway.
+unsafe extern "C" fn log_printf_cb(
+    handle: lv2_sys::LV2_Log_Handle,
+    type_: lv2_sys::LV2_URID,
+    fmt: *const c_char,
+) -> std::os::raw::c_int {
+    if handle.is_null() || fmt.is_null() {
+        return -1;
+    }
+    let map = unsafe { &*(handle as *const UridMap) };
+    let type_name = map.unmap(type_).unwrap_or_else(|| format!("urid#{type_}"));
+    match unsafe { CStr::from_ptr(fmt) }.to_str() {
+        Ok(s) => {
+            eprintln!("{}{}", log_prefix(&type_name), s.trim_end_matches('\n'));
+            0
+        }
+        Err(_) => -1,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -634,6 +670,9 @@ pub struct Port {
     pub minimum: Option<f32>,
     pub maximum: Option<f32>,
     pub optional: bool,
+    /// URIs listed via atom:supports (midi:MidiEvent, patch:Message,
+    /// time:Position, ...). Empty for non-atom ports.
+    pub supports: Vec<String>,
 }
 
 impl Port {
@@ -668,6 +707,13 @@ pub struct UiPlugin {
 }
 
 #[derive(Clone, Debug)]
+pub struct DefaultStateProperty {
+    pub key_uri: String,
+    pub value: String,
+    pub datatype: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct Plugin {
     pub uri: String,
     pub name: String,
@@ -676,6 +722,7 @@ pub struct Plugin {
     pub ports: Vec<Port>,
     pub required_features: Vec<String>,
     pub uis: Vec<UiPlugin>,
+    pub default_state: Vec<DefaultStateProperty>,
 }
 
 impl Plugin {
@@ -780,6 +827,7 @@ pub fn default_lv2_paths() -> Vec<PathBuf> {
 
 pub struct World {
     pub plugins: Vec<Plugin>,
+    presets: HashMap<String, Vec<Preset>>,
     urid: Arc<UridMap>,
 }
 
@@ -792,6 +840,7 @@ impl World {
     pub fn with_paths(paths: &[PathBuf]) -> Self {
         let mut world = World {
             plugins: Vec::new(),
+            presets: HashMap::new(),
             urid: Arc::new(UridMap::new()),
         };
         let mut seen: HashSet<String> = HashSet::new();
@@ -841,6 +890,13 @@ impl World {
         self.plugins.iter().find(|p| p.uri == uri)
     }
 
+    pub fn presets_for(&self, plugin_uri: &str) -> &[Preset] {
+        self.presets
+            .get(plugin_uri)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
     fn load_bundle(&mut self, bundle: &Path, seen: &mut HashSet<String>) -> Result<(), Error> {
         let manifest = bundle.join("manifest.ttl");
         if !manifest.is_file() {
@@ -849,21 +905,30 @@ impl World {
         let mut graph = Graph::default();
         parse_ttl_into(&mut graph, &manifest)?;
 
-        // Subjects declared `a lv2:Plugin` in the manifest.
-        let subjects: Vec<NamedNode> = graph
+        let plugin_subjects: Vec<NamedNode> = graph
             .subjects_for_predicate_object(nn(uris::RDF_TYPE), nn(uris::LV2_PLUGIN))
             .filter_map(|s| match s {
                 NamedOrBlankNodeRef::NamedNode(n) => Some(n.into_owned()),
                 _ => None,
             })
             .collect();
-        if subjects.is_empty() {
+        let preset_subjects: Vec<NamedNode> = graph
+            .subjects_for_predicate_object(nn(uris::RDF_TYPE), nn(uris::PRESETS_PRESET))
+            .filter_map(|s| match s {
+                NamedOrBlankNodeRef::NamedNode(n) => Some(n.into_owned()),
+                _ => None,
+            })
+            .collect();
+
+        // A bundle may contain only presets (user preset bundles) — do not bail
+        // just because there are no plugins.
+        if plugin_subjects.is_empty() && preset_subjects.is_empty() {
             return Ok(());
         }
 
-        // Pull in rdfs:seeAlso data files (e.g. the real <plugin>.ttl).
+        // Pull in rdfs:seeAlso data files for plugins AND presets.
         let mut extra_files: Vec<PathBuf> = Vec::new();
-        for s in &subjects {
+        for s in plugin_subjects.iter().chain(preset_subjects.iter()) {
             for obj in graph.objects_for_subject_predicate(s.as_ref(), nn(uris::RDFS_SEE_ALSO)) {
                 if let TermRef::NamedNode(n) = obj
                     && let Some(p) = file_uri_to_path(n.as_str())
@@ -878,9 +943,37 @@ impl World {
             }
         }
 
-        for s in &subjects {
+        // Re-collect presets: data files may declare presets the manifest did
+        // not type, or presets defined inline in the plugin's own .ttl.
+        let preset_subjects: Vec<NamedNode> = graph
+            .subjects_for_predicate_object(nn(uris::RDF_TYPE), nn(uris::PRESETS_PRESET))
+            .filter_map(|s| match s {
+                NamedOrBlankNodeRef::NamedNode(n) => Some(n.into_owned()),
+                _ => None,
+            })
+            .collect();
+
+        for ps in &preset_subjects {
+            // A preset is only usable if we know which plugin it applies to.
+            let Some(applies_to) = graph
+                .objects_for_subject_predicate(ps.as_ref(), nn(uris::LV2_APPLIES_TO))
+                .find_map(|t| match t {
+                    TermRef::NamedNode(n) => Some(n.as_str().to_string()),
+                    _ => None,
+                })
+            else {
+                continue;
+            };
+            let preset = build_preset(&graph, ps);
+            let entry = self.presets.entry(applies_to).or_default();
+            if !entry.iter().any(|p| p.uri == preset.uri) {
+                entry.push(preset);
+            }
+        }
+
+        for s in &plugin_subjects {
             if seen.contains(s.as_str()) {
-                continue; // same plugin found earlier on the search path
+                continue;
             }
             match build_plugin(&graph, s, bundle) {
                 Ok(p) => {
@@ -934,12 +1027,16 @@ impl World {
         let min_block = features.min_block_length();
 
         // 3. Build the C feature array (heap-pinned; must outlive the instance).
+        let state_dir = std::env::temp_dir()
+            .join("yeli-state")
+            .join(sanitize_uri(&plugin.uri));
+        let _ = std::fs::create_dir_all(&state_dir);
         let mut c_features = build_c_features(
             &self.urid,
             min_block as i32,
             max_block as i32,
             ATOM_SEQUENCE_CAPACITY as i32,
-            &plugin.uri,
+            state_dir,
         );
 
         // 4. Load the shared object and find the matching descriptor.
@@ -1015,8 +1112,8 @@ impl World {
             None
         };
 
-        // 5c. Load presets from the bundle.
-        let presets = load_presets_from_bundle(&plugin.bundle_path, &plugin.uri, &self.urid);
+        // 5c. Presets discovered world-wide (own bundle + third-party bundles).
+        let presets = self.presets_for(&plugin.uri).to_vec();
 
         // 6. Allocate and connect port buffers.
         let seq_urid = self.urid.map(uris::ATOM_SEQUENCE);
@@ -1086,7 +1183,7 @@ impl World {
             format!("{bundle}/")
         };
 
-        Ok(Instance {
+        let mut instance = Instance {
             handle,
             descriptor,
             active: false,
@@ -1114,7 +1211,18 @@ impl World {
             position: TimingInfo::default(),
             position_dirty: false,
             presets,
-        })
+        };
+
+        // state:loadDefaultState — restore the plugin's declared default state
+        // after instantiation and before the first run().
+        if instance.state_iface.is_some() && !plugin.default_state.is_empty() {
+            let st = instance.default_state_to_plugin_state(&plugin.default_state);
+            if let Err(e) = instance.restore_state(&st) {
+                eprintln!("warning: {}: default state restore failed: {e}", plugin.uri);
+            }
+        }
+
+        Ok(instance)
     }
 }
 
@@ -1208,6 +1316,14 @@ fn build_plugin(graph: &Graph, subject: &NamedNode, bundle: &Path) -> Result<Plu
                 .and_then(term_f32)
         };
 
+        let supports: Vec<String> = graph
+            .objects_for_subject_predicate(ps, nn(uris::ATOM_SUPPORTS))
+            .filter_map(|t| match t {
+                TermRef::NamedNode(n) => Some(n.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+
         ports.push(Port {
             index,
             symbol,
@@ -1218,9 +1334,30 @@ fn build_plugin(graph: &Graph, subject: &NamedNode, bundle: &Path) -> Result<Plu
             minimum: get_f(uris::LV2_MINIMUM),
             maximum: get_f(uris::LV2_MAXIMUM),
             optional,
+            supports,
         });
     }
     ports.sort_by_key(|p| p.index);
+
+    let mut default_state = Vec::new();
+    if let Some(state_term) = graph.object_for_subject_predicate(s, nn(uris::STATE_STATE)) {
+        let state_node: Option<NamedOrBlankNodeRef> = match state_term {
+            TermRef::NamedNode(n) => Some(n.into()),
+            TermRef::BlankNode(b) => Some(b.into()),
+            _ => None,
+        };
+        if let Some(sn) = state_node {
+            for t in graph.triples_for_subject(sn) {
+                if let TermRef::Literal(l) = t.object {
+                    default_state.push(DefaultStateProperty {
+                        key_uri: t.predicate.as_str().to_string(),
+                        value: l.value().to_string(),
+                        datatype: Some(l.datatype().as_str().to_string()),
+                    });
+                }
+            }
+        }
+    }
 
     let mut uis = Vec::new();
     for ui_term in graph.objects_for_subject_predicate(s, nn(uris::UI_UI)) {
@@ -1272,99 +1409,38 @@ fn build_plugin(graph: &Graph, subject: &NamedNode, bundle: &Path) -> Result<Plu
         ports,
         required_features,
         uis,
+        default_state,
     })
 }
 
-/// Load all preset definitions found in an LV2 bundle directory.
-fn load_presets_from_bundle(bundle: &Path, plugin_uri: &str, _urid: &UridMap) -> Vec<Preset> {
-    let mut graph = Graph::default();
-
-    // Parse manifest first so we have its prefixes/types.
-    let manifest = bundle.join("manifest.ttl");
-    if manifest.is_file() {
-        let _ = parse_ttl_into(&mut graph, &manifest);
-    }
-
-    // Parse all direct .ttl files in the bundle.
-    if let Ok(dir) = std::fs::read_dir(bundle) {
-        for entry in dir.flatten() {
-            let path = entry.path();
-            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("ttl") {
-                let _ = parse_ttl_into(&mut graph, &path);
-            }
-        }
-    }
-
-    // Also pull in rdfs:seeAlso for preset subjects already found.
-    let mut extra_files = Vec::new();
-    for s in graph.subjects_for_predicate_object(nn(uris::RDF_TYPE), nn(uris::PRESETS_PRESET)) {
-        for obj in graph.objects_for_subject_predicate(s, nn(uris::RDFS_SEE_ALSO)) {
-            if let TermRef::NamedNode(n) = obj
-                && let Some(p) = file_uri_to_path(n.as_str())
-            {
-                extra_files.push(p);
-            }
-        }
-    }
-    for path in extra_files {
-        if path.is_file() {
-            let _ = parse_ttl_into(&mut graph, &path);
-        }
-    }
-
-    let mut presets = Vec::new();
-
-    for s in graph.subjects_for_predicate_object(nn(uris::RDF_TYPE), nn(uris::PRESETS_PRESET)) {
-        let subject = match s {
-            NamedOrBlankNodeRef::NamedNode(n) => n.as_str().to_string(),
+fn build_preset(graph: &Graph, subject: &NamedNode) -> Preset {
+    let s = subject.as_ref();
+    let label = graph
+        .object_for_subject_predicate(s, nn(uris::PRESETS_label))
+        .and_then(term_str)
+        .unwrap_or_else(|| subject.as_str().to_string());
+    let mut controls = HashMap::new();
+    for p in graph.objects_for_subject_predicate(s, nn(uris::LV2_PORT)) {
+        let port_node: NamedOrBlankNodeRef = match p {
+            TermRef::NamedNode(n) => n.into(),
+            TermRef::BlankNode(b) => b.into(),
             _ => continue,
         };
-
-        // Check lv2:appliesTo — skip if it's present but doesn't target us.
-        let has_any_applies_to = graph
-            .objects_for_subject_predicate(s, nn(uris::LV2_APPLIES_TO))
-            .next()
-            .is_some();
-        let applies_to_this = graph
-            .objects_for_subject_predicate(s, nn(uris::LV2_APPLIES_TO))
-            .any(|t| matches!(t, TermRef::NamedNode(n) if n.as_str() == plugin_uri));
-
-        if has_any_applies_to && !applies_to_this {
-            continue;
+        let symbol = graph
+            .object_for_subject_predicate(port_node, nn(uris::LV2_SYMBOL))
+            .and_then(term_str);
+        let value = graph
+            .object_for_subject_predicate(port_node, nn(uris::PRESETS_value))
+            .and_then(term_f32);
+        if let (Some(sym), Some(val)) = (symbol, value) {
+            controls.insert(sym, val);
         }
-
-        let label = graph
-            .object_for_subject_predicate(s, nn(uris::PRESETS_label))
-            .and_then(term_str)
-            .unwrap_or_else(|| subject.clone());
-
-        let mut controls = HashMap::new();
-        for p in graph.objects_for_subject_predicate(s, nn(uris::LV2_PORT)) {
-            let port_node: NamedOrBlankNodeRef = match p {
-                TermRef::NamedNode(n) => n.into(),
-                TermRef::BlankNode(b) => b.into(),
-                _ => continue,
-            };
-            let symbol = graph
-                .object_for_subject_predicate(port_node, nn(uris::LV2_SYMBOL))
-                .and_then(term_str);
-            let value = graph
-                .object_for_subject_predicate(port_node, nn(uris::PRESETS_value))
-                .and_then(term_f32);
-            if let (Some(sym), Some(val)) = (symbol, value) {
-                controls.insert(sym, val);
-            }
-        }
-
-        presets.push(Preset {
-            uri: subject,
-            label,
-            controls,
-        });
     }
-
-    presets.sort_by(|a, b| a.label.cmp(&b.label));
-    presets
+    Preset {
+        uri: subject.as_str().to_string(),
+        label,
+        controls,
+    }
 }
 
 /// Shared state accessed by the schedule callback (from the audio thread)
@@ -1585,7 +1661,7 @@ impl AtomObjectBuilder {
         self.buf.extend_from_slice(&value_type.to_ne_bytes());
         self.buf.extend_from_slice(value);
         let pad = atom_pad(value.len());
-        self.buf.extend(std::iter::repeat(0u8).take(pad));
+        self.buf.extend(std::iter::repeat_n(0u8, pad));
         self
     }
 
@@ -1663,42 +1739,24 @@ fn parse_atom_object_body(data: &[u8]) -> Option<AtomObject<'_>> {
     })
 }
 
-/// Host-side state path management (state:makePath, mapPath, freePath).
-/// Each instance gets a private state directory under temp.
-struct StatePathManager {
-    root: PathBuf,
+/// Host side of state:makePath / state:mapPath / state:freePath.
+/// Each instance gets a private state directory.
+struct StatePathHost {
+    dir: PathBuf,
 }
 
-impl StatePathManager {
-    fn new(plugin_uri: &str) -> Self {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        plugin_uri.hash(&mut hasher);
-        let id = STATE_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir()
-            .join("yeli-state")
-            .join(format!("{:016x}-{id}", hasher.finish()));
-        let _ = std::fs::create_dir_all(&root);
-        StatePathManager { root }
-    }
-
-    fn safe_join(&self, requested: &str) -> PathBuf {
-        let mut out = self.root.clone();
-        for component in Path::new(requested).components() {
-            if let std::path::Component::Normal(part) = component {
-                out.push(part);
-            }
-        }
-        out
-    }
-}
-
-static STATE_INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(1);
-
+/// Allocate a C string with libc::malloc so it is safe whether the plugin
+/// frees it via state:freePath (our free) or a stray free().
 fn alloc_c_string(s: &str) -> *mut c_char {
-    let bytes: Vec<u8> = s.as_bytes().iter().copied().filter(|b| *b != 0).collect();
-    match CString::new(bytes) {
-        Ok(c) => c.into_raw(),
-        Err(_) => std::ptr::null_mut(),
+    let bytes = s.as_bytes();
+    unsafe {
+        let p = libc::malloc(bytes.len() + 1) as *mut c_char;
+        if p.is_null() {
+            return std::ptr::null_mut();
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len());
+        *p.add(bytes.len()) = 0;
+        p
     }
 }
 
@@ -1709,49 +1767,58 @@ unsafe extern "C" fn state_make_path_cb(
     if handle.is_null() || path.is_null() {
         return std::ptr::null_mut();
     }
-    let manager = unsafe { &*(handle as *const StatePathManager) };
-    let requested = unsafe { CStr::from_ptr(path) }.to_string_lossy();
-    let out = manager.safe_join(&requested);
-    if let Some(parent) = out.parent() {
+    let host = unsafe { &*(handle as *const StatePathHost) };
+    let Ok(rel) = unsafe { CStr::from_ptr(path) }.to_str() else {
+        return std::ptr::null_mut();
+    };
+    let rel_path = Path::new(rel);
+    // Reject absolute and directory-escaping paths.
+    if rel_path.is_absolute()
+        || rel_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return std::ptr::null_mut();
+    }
+    let abs = host.dir.join(rel_path);
+    if let Some(parent) = abs.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    alloc_c_string(&out.to_string_lossy())
+    alloc_c_string(&abs.to_string_lossy())
 }
 
 unsafe extern "C" fn state_abstract_path_cb(
     handle: lv2_sys::LV2_State_Map_Path_Handle,
-    absolute_path: *const c_char,
+    absolute: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() || absolute_path.is_null() {
+    if handle.is_null() || absolute.is_null() {
         return std::ptr::null_mut();
     }
-    let manager = unsafe { &*(handle as *const StatePathManager) };
-    let abs = PathBuf::from(
-        unsafe { CStr::from_ptr(absolute_path) }
-            .to_string_lossy()
-            .into_owned(),
-    );
-    let abstract_path = abs
-        .strip_prefix(&manager.root)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| abs.to_string_lossy().into_owned());
-    alloc_c_string(&abstract_path)
+    let host = unsafe { &*(handle as *const StatePathHost) };
+    let Ok(abs_str) = unsafe { CStr::from_ptr(absolute) }.to_str() else {
+        return std::ptr::null_mut();
+    };
+    let abs = Path::new(abs_str);
+    let rel = abs.strip_prefix(&host.dir).unwrap_or(abs);
+    alloc_c_string(&rel.to_string_lossy())
 }
 
 unsafe extern "C" fn state_absolute_path_cb(
     handle: lv2_sys::LV2_State_Map_Path_Handle,
-    abstract_path: *const c_char,
+    abstract_: *const c_char,
 ) -> *mut c_char {
-    if handle.is_null() || abstract_path.is_null() {
+    if handle.is_null() || abstract_.is_null() {
         return std::ptr::null_mut();
     }
-    let manager = unsafe { &*(handle as *const StatePathManager) };
-    let s = unsafe { CStr::from_ptr(abstract_path) }.to_string_lossy();
-    let p = PathBuf::from(s.as_ref());
+    let host = unsafe { &*(handle as *const StatePathHost) };
+    let Ok(rel) = unsafe { CStr::from_ptr(abstract_) }.to_str() else {
+        return std::ptr::null_mut();
+    };
+    let p = Path::new(rel);
     let abs = if p.is_absolute() {
-        p
+        p.to_path_buf()
     } else {
-        manager.root.join(p)
+        host.dir.join(p)
     };
     alloc_c_string(&abs.to_string_lossy())
 }
@@ -1761,9 +1828,7 @@ unsafe extern "C" fn state_free_path_cb(
     path: *mut c_char,
 ) {
     if !path.is_null() {
-        unsafe {
-            let _ = CString::from_raw(path);
-        }
+        unsafe { libc::free(path as *mut c_void) };
     }
 }
 
@@ -1773,7 +1838,7 @@ struct InstanceFeatures {
     unmap: lv2_sys::LV2_URID_Unmap,
     schedule: lv2_sys::LV2_Worker_Schedule,
     log: lv2_sys::LV2_Log_Log,
-    state_host: Box<StatePathManager>,
+    state_host: Box<StatePathHost>,
     make_path: lv2_sys::LV2_State_Make_Path,
     map_path: lv2_sys::LV2_State_Map_Path,
     free_path: lv2_sys::LV2_State_Free_Path,
@@ -1798,12 +1863,18 @@ fn opt(key: u32, type_: u32, value: *const c_void) -> lv2_sys::LV2_Options_Optio
     }
 }
 
+fn sanitize_uri(uri: &str) -> String {
+    uri.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .collect()
+}
+
 fn build_c_features(
     urid: &Arc<UridMap>,
     min_block: i32,
     max_block: i32,
     seq_size: i32,
-    plugin_uri: &str,
+    state_dir: PathBuf,
 ) -> Box<InstanceFeatures> {
     let mut f = Box::new(InstanceFeatures {
         _urid: urid.clone(),
@@ -1824,7 +1895,7 @@ fn build_c_features(
             printf: None,
             vprintf: None,
         },
-        state_host: Box::new(StatePathManager::new(plugin_uri)),
+        state_host: Box::new(StatePathHost { dir: state_dir }),
         make_path: lv2_sys::LV2_State_Make_Path {
             handle: std::ptr::null_mut(),
             path: Some(state_make_path_cb),
@@ -1871,7 +1942,7 @@ fn build_c_features(
     });
     f.log.vprintf = Some(log_vprintf_cb);
 
-    let state_handle = &*f.state_host as *const StatePathManager as *mut c_void;
+    let state_handle = &*f.state_host as *const StatePathHost as *mut c_void;
     f.make_path.handle = state_handle;
     f.map_path.handle = state_handle;
     f.free_path.handle = state_handle;
@@ -2565,19 +2636,36 @@ impl Instance {
         Ok(())
     }
 
-    /// Queue a raw MIDI message into the first atom-sequence input port.
-    pub fn push_midi(&mut self, frame: i64, message: &[u8]) -> Result<(), Error> {
-        let midi = self.midi_urid;
-        for (port, buf) in self.ports.iter().zip(self.buffers.iter_mut()) {
+    /// Buffer index of the first atom-sequence input that declares support
+    /// for `uri` via atom:supports; falls back to the first atom input.
+    fn atom_in_index_supporting(&self, uri: &str) -> Option<usize> {
+        let mut fallback = None;
+        for (i, port) in self.ports.iter().enumerate() {
             if port.direction == PortDirection::Input
-                && let PortBuffer::AtomIn(seq) = buf
+                && matches!(self.buffers[i], PortBuffer::AtomIn(_))
             {
-                return seq.push_event(frame, midi, message);
+                if port.supports.iter().any(|s| s == uri) {
+                    return Some(i);
+                }
+                if fallback.is_none() {
+                    fallback = Some(i);
+                }
             }
         }
-        Err(Error::UnsupportedPort(
-            "plugin has no atom-sequence input".into(),
-        ))
+        fallback
+    }
+
+    /// Queue a raw MIDI message into an atom-sequence input port that
+    /// declares atom:supports midi:MidiEvent (falls back to the first atom input).
+    pub fn push_midi(&mut self, frame: i64, message: &[u8]) -> Result<(), Error> {
+        let midi = self.midi_urid;
+        let idx = self
+            .atom_in_index_supporting(uris::MIDI_EVENT)
+            .ok_or_else(|| Error::UnsupportedPort("plugin has no atom-sequence input".into()))?;
+        match &mut self.buffers[idx] {
+            PortBuffer::AtomIn(seq) => seq.push_event(frame, midi, message),
+            _ => unreachable!(),
+        }
     }
 
     /// Set a control input by its port index.
@@ -3151,35 +3239,86 @@ impl Instance {
         &self.presets
     }
 
+    fn apply_preset_controls(&mut self, controls: &HashMap<String, f32>) {
+        for (symbol, value) in controls {
+            let port_index = self.ports.iter().find_map(|p| {
+                (p.symbol == *symbol
+                    && p.direction == PortDirection::Input
+                    && p.kind == PortKind::Control)
+                    .then_some(PortIndex(p.index))
+            });
+            if let Some(idx) = port_index {
+                // set_control_input clamps to the port's min/max range.
+                self.set_control_input(idx, *value);
+            }
+        }
+    }
+
     /// Load a preset by index.
     pub fn load_preset(&mut self, index: usize) -> bool {
-        let controls = match self.presets.get(index) {
-            Some(p) => p.controls.clone(),
-            None => return false,
+        let Some(controls) = self.presets.get(index).map(|p| p.controls.clone()) else {
+            return false;
         };
-        for (symbol, value) in &controls {
-            self.set_control(symbol, *value);
-        }
+        self.apply_preset_controls(&controls);
         true
     }
 
     /// Load a preset by URI.
     pub fn load_preset_by_uri(&mut self, uri: &str) -> bool {
-        let controls = match self.presets.iter().find(|p| p.uri == uri) {
-            Some(p) => p.controls.clone(),
-            None => return false,
+        let Some(controls) = self
+            .presets
+            .iter()
+            .find(|p| p.uri == uri)
+            .map(|p| p.controls.clone())
+        else {
+            return false;
         };
-        for (symbol, value) in &controls {
-            self.set_control(symbol, *value);
-        }
+        self.apply_preset_controls(&controls);
         true
+    }
+
+    /// Convert the plugin's declared default state properties (from state:state
+    /// in the Turtle data) into a PluginState map suitable for restore_state().
+    fn default_state_to_plugin_state(&self, props: &[DefaultStateProperty]) -> PluginState {
+        let mut st = PluginState::new();
+        let pod = lv2_sys::LV2_State_Flags::LV2_STATE_IS_POD.0
+            | lv2_sys::LV2_State_Flags::LV2_STATE_IS_PORTABLE.0;
+        for p in props {
+            let key = self._urid.map(&p.key_uri);
+            let (type_uri, bytes): (&str, Vec<u8>) = match p.datatype.as_deref() {
+                Some(uris::XSD_INTEGER) | Some(uris::XSD_INT) => {
+                    (uris::ATOM_INT, p.value.trim().parse::<i32>().unwrap_or(0).to_ne_bytes().to_vec())
+                }
+                Some(uris::XSD_LONG) => {
+                    (uris::ATOM_LONG, p.value.trim().parse::<i64>().unwrap_or(0).to_ne_bytes().to_vec())
+                }
+                Some(uris::XSD_FLOAT) => {
+                    (uris::ATOM_FLOAT, p.value.trim().parse::<f32>().unwrap_or(0.0).to_ne_bytes().to_vec())
+                }
+                Some(uris::XSD_DOUBLE) | Some(uris::XSD_DECIMAL) => {
+                    (uris::ATOM_DOUBLE, p.value.trim().parse::<f64>().unwrap_or(0.0).to_ne_bytes().to_vec())
+                }
+                Some(uris::XSD_BOOLEAN) => {
+                    let v: i32 = if p.value.trim() == "true" || p.value.trim() == "1" { 1 } else { 0 };
+                    (uris::ATOM_BOOL, v.to_ne_bytes().to_vec())
+                }
+                _ => {
+                    let mut b = p.value.as_bytes().to_vec();
+                    b.push(0); // atom:String is NUL-terminated
+                    (uris::ATOM_STRING, b)
+                }
+            };
+            st.insert(key, StateProperty { value: bytes, type_: self._urid.map(type_uri), flags: pod });
+        }
+        st
     }
 
     /// Set the transport position for the LV2 Time extension.
     ///
     /// Call this before `run()` to provide timing information to plugins
     /// that support the LV2 Time extension. The position is injected as a
-    /// `time:Position` atom:Object event into the first atom input before
+    /// `time:Position` atom:Object event into the atom input that declares
+    /// `atom:supports time:Position` (fallback: first atom input) before
     /// each `run()` call.
     pub fn set_position(&mut self, position: TimingInfo) {
         self.position = position;
@@ -3192,7 +3331,8 @@ impl Instance {
     }
 
     /// Build the body of a time:Position atom:Object from the current TimingInfo.
-    fn build_position_body(&self) -> Vec<u8> {
+    /// Returns (event type URID = atom:Object, body bytes).
+    fn build_position_body(&self) -> (u32, Vec<u8>) {
         let u = &self._urid;
         let atom_object = u.map(uris::ATOM_OBJECT);
         let atom_long = u.map(uris::ATOM_LONG);
@@ -3235,37 +3375,36 @@ impl Instance {
             atom_float,
             &pos.frames_per_second.to_ne_bytes(),
         );
-        b.into_event_body()
+        (atom_object, b.into_event_body())
     }
 
-    /// Inject the current transport position into the first atom sequence input.
+    /// Inject the current transport position into the atom input that declares
+    /// atom:supports time:Position (fallback: first atom input).
     /// Called automatically from `run()` if position has been set.
     fn inject_position_if_dirty(&mut self) {
         if !self.position_dirty {
             return;
         }
         self.position_dirty = false;
-        let atom_object = self._urid.map(uris::ATOM_OBJECT);
-        let body = self.build_position_body();
-        for buf in self.buffers.iter_mut() {
-            if let PortBuffer::AtomIn(seq) = buf {
-                let _ = seq.push_event(0, atom_object, &body);
-                break;
-            }
+        let (ty, body) = self.build_position_body();
+        if let Some(i) = self.atom_in_index_supporting(uris::TIME_POSITION)
+            && let PortBuffer::AtomIn(seq) = &mut self.buffers[i]
+        {
+            let _ = seq.push_event(0, ty, &body);
         }
     }
 
     /// Write the current transport position into an externally-owned atom sequence.
     /// Useful with `run_with_ports()`, where atom inputs are passed in.
     pub fn push_position_to(&self, seq: &mut AtomSequence, frame: i64) -> Result<(), Error> {
-        let atom_object = self._urid.map(uris::ATOM_OBJECT);
-        let body = self.build_position_body();
-        seq.push_event(frame, atom_object, &body)
+        let (ty, body) = self.build_position_body();
+        seq.push_event(frame, ty, &body)
     }
 
-    /// Send a patch:Get message to the plugin via the first atom sequence input.
+    /// Send a patch:Get message to the plugin's patch-capable atom input.
     ///
-    /// This requests the value of `property` (URID) from the plugin.
+    /// Per the Patch spec, a property request uses `patch:property`.
+    /// Pass `property = 0` to request the entire object state (a bare Get).
     pub fn patch_get(&mut self, frame: i64, property: u32) -> Result<(), Error> {
         let atom_object = self._urid.map(uris::ATOM_OBJECT);
         let atom_urid = self._urid.map(uris::ATOM_URID);
@@ -3276,12 +3415,13 @@ impl Instance {
         if property != 0 {
             obj.property(patch_property, atom_urid, &property.to_ne_bytes());
         }
-        self.send_atom_event(frame, atom_object, &obj.into_event_body())
+        self.send_patch_event(frame, atom_object, obj.into_event_body())
     }
 
     /// Send a patch:Set message to the plugin.
     ///
-    /// Sets `property` (URID) to `value` of type `type_urid` (e.g. atom:Float).
+    /// Sets `property` (URID) to `value` of atom type `type_urid`
+    /// (e.g. atom:Float, atom:Path as a NUL-terminated string).
     pub fn patch_set(
         &mut self,
         frame: i64,
@@ -3298,20 +3438,35 @@ impl Instance {
         let mut obj = AtomObjectBuilder::new(atom_object, patch_set, 0);
         obj.property(patch_property, atom_urid, &property.to_ne_bytes());
         obj.property(patch_value, type_urid, value);
-
-        self.send_atom_event(frame, atom_object, &obj.into_event_body())
+        self.send_patch_event(frame, atom_object, obj.into_event_body())
     }
 
-    /// Send a typed atom event to the first atom sequence input port.
-    fn send_atom_event(&mut self, frame: i64, type_urid: u32, body: &[u8]) -> Result<(), Error> {
-        for buf in self.buffers.iter_mut() {
-            if let PortBuffer::AtomIn(seq) = buf {
-                return seq.push_event(frame, type_urid, body);
-            }
+    /// Convenience: patch:Set with a float value.
+    pub fn patch_set_float(&mut self, frame: i64, property: u32, value: f32) -> Result<(), Error> {
+        let atom_float = self._urid.map(uris::ATOM_FLOAT);
+        self.patch_set(frame, property, atom_float, &value.to_ne_bytes())
+    }
+
+    /// Convenience: patch:Set with a path value (atom:Path — NUL-terminated).
+    pub fn patch_set_path(&mut self, frame: i64, property: u32, path: &str) -> Result<(), Error> {
+        let atom_path = self._urid.map("http://lv2plug.in/ns/ext/atom#Path");
+        let mut bytes = path.as_bytes().to_vec();
+        bytes.push(0);
+        self.patch_set(frame, property, atom_path, &bytes)
+    }
+
+    /// Push an atom:Object event body into the patch-capable atom input.
+    ///
+    /// Prefers a port declaring `atom:supports patch:Message`, falling back
+    /// to the first atom input.
+    fn send_patch_event(&mut self, frame: i64, type_urid: u32, body: Vec<u8>) -> Result<(), Error> {
+        let idx = self
+            .atom_in_index_supporting(uris::PATCH_MESSAGE)
+            .ok_or_else(|| Error::UnsupportedPort("plugin has no atom-sequence input".into()))?;
+        match &mut self.buffers[idx] {
+            PortBuffer::AtomIn(seq) => seq.push_event(frame, type_urid, &body),
+            _ => unreachable!(),
         }
-        Err(Error::UnsupportedPort(
-            "plugin has no atom-sequence input".into(),
-        ))
     }
 
     /// Read parsed atom:Object messages from atom sequence outputs.

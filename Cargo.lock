@@ -247,6 +247,7 @@ name = "yeli"
 version = "0.3.0"
 dependencies = [
  "hound",
+ "libc",
  "libloading",
  "lv2-sys",
  "oxrdf",
