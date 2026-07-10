@@ -12,10 +12,10 @@ name = "yeli"
 [dependencies]
 oxttl = "0.2"
 oxrdf = "0.3"
-lv2-sys = "2.0"
+# lv2-sys = "2.0"
 libloading = "0.9"
 hound = "3.5"
 libc = "0.2"
 
-[patch.crates-io]
+# [patch.crates-io]
 lv2-sys = { git = "https://github.com/mlm-games/rust-lv2", package = "lv2-sys" }
