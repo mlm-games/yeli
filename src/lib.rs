@@ -52,6 +52,7 @@ pub mod uris {
     pub const ATOM_SEQUENCE: &str = "http://lv2plug.in/ns/ext/atom#Sequence";
     pub const ATOM_CHUNK: &str = "http://lv2plug.in/ns/ext/atom#Chunk";
     pub const ATOM_INT: &str = "http://lv2plug.in/ns/ext/atom#Int";
+    pub const ATOM_BUFFER_TYPE: &str = "http://lv2plug.in/ns/ext/atom#bufferType";
     pub const ATOM_SUPPORTS: &str = "http://lv2plug.in/ns/ext/atom#supports";
 
     pub const MIDI_EVENT: &str = "http://lv2plug.in/ns/ext/midi#MidiEvent";
@@ -581,7 +582,12 @@ fn log_prefix(type_name: &str) -> &'static str {
 #[cfg(unix)]
 unsafe fn vformat(fmt: *const c_char, ap: *mut c_void) -> Option<String> {
     unsafe extern "C" {
-        fn vsnprintf(s: *mut c_char, n: libc::size_t, format: *const c_char, ap: *mut c_void) -> libc::c_int;
+        fn vsnprintf(
+            s: *mut c_char,
+            n: libc::size_t,
+            format: *const c_char,
+            ap: *mut c_void,
+        ) -> libc::c_int;
     }
     let mut buf = vec![0u8; 4096];
     let n = unsafe { vsnprintf(buf.as_mut_ptr() as *mut c_char, buf.len(), fmt, ap) };
@@ -594,7 +600,10 @@ unsafe fn vformat(fmt: *const c_char, ap: *mut c_void) -> Option<String> {
 
 #[cfg(not(unix))]
 unsafe fn vformat(fmt: *const c_char, _ap: *mut c_void) -> Option<String> {
-    unsafe { CStr::from_ptr(fmt) }.to_str().ok().map(str::to_owned)
+    unsafe { CStr::from_ptr(fmt) }
+        .to_str()
+        .ok()
+        .map(str::to_owned)
 }
 
 unsafe extern "C" fn log_vprintf_cb(
@@ -1306,6 +1315,22 @@ fn build_plugin(graph: &Graph, subject: &NamedNode, bundle: &Path) -> Result<Plu
             kind = PortKind::Unknown;
         }
 
+        // If atom:bufferType is explicitly set but atom:Sequence is not
+        // among the declared buffer types, mark the port as unsupported.
+        if kind == PortKind::AtomSequence {
+            let buffer_types: Vec<String> = graph
+                .objects_for_subject_predicate(ps, nn(uris::ATOM_BUFFER_TYPE))
+                .filter_map(|t| match t {
+                    TermRef::NamedNode(n) => Some(n.as_str().to_string()),
+                    _ => None,
+                })
+                .collect();
+            if !buffer_types.is_empty() && !buffer_types.iter().any(|bt| bt == uris::ATOM_SEQUENCE)
+            {
+                kind = PortKind::Unknown;
+            }
+        }
+
         let optional = graph
             .objects_for_subject_predicate(ps, nn(uris::LV2_PORT_PROPERTY))
             .any(|t| matches!(t, TermRef::NamedNode(n) if n.as_str() == uris::LV2_CONNECTION_OPTIONAL));
@@ -1419,6 +1444,14 @@ fn build_preset(graph: &Graph, subject: &NamedNode) -> Preset {
         .object_for_subject_predicate(s, nn(uris::PRESETS_label))
         .and_then(term_str)
         .unwrap_or_else(|| subject.as_str().to_string());
+
+    let bank = graph
+        .object_for_subject_predicate(s, nn(uris::PRESETS_bank))
+        .and_then(|t| match t {
+            TermRef::NamedNode(n) => Some(n.as_str().to_string()),
+            _ => None,
+        });
+
     let mut controls = HashMap::new();
     for p in graph.objects_for_subject_predicate(s, nn(uris::LV2_PORT)) {
         let port_node: NamedOrBlankNodeRef = match p {
@@ -1436,10 +1469,33 @@ fn build_preset(graph: &Graph, subject: &NamedNode) -> Preset {
             controls.insert(sym, val);
         }
     }
+
+    let mut state = Vec::new();
+    if let Some(state_term) = graph.object_for_subject_predicate(s, nn(uris::STATE_STATE)) {
+        let state_node: Option<NamedOrBlankNodeRef> = match state_term {
+            TermRef::NamedNode(n) => Some(n.into()),
+            TermRef::BlankNode(b) => Some(b.into()),
+            _ => None,
+        };
+        if let Some(sn) = state_node {
+            for t in graph.triples_for_subject(sn) {
+                if let TermRef::Literal(l) = t.object {
+                    state.push(DefaultStateProperty {
+                        key_uri: t.predicate.as_str().to_string(),
+                        value: l.value().to_string(),
+                        datatype: Some(l.datatype().as_str().to_string()),
+                    });
+                }
+            }
+        }
+    }
+
     Preset {
         uri: subject.as_str().to_string(),
         label,
         controls,
+        bank,
+        state,
     }
 }
 
@@ -1865,7 +1921,13 @@ fn opt(key: u32, type_: u32, value: *const c_void) -> lv2_sys::LV2_Options_Optio
 
 fn sanitize_uri(uri: &str) -> String {
     uri.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -2329,6 +2391,10 @@ pub struct Preset {
     pub label: String,
     /// Control port values (port symbol -> value).
     pub controls: HashMap<String, f32>,
+    /// Optional pset:bank URI this preset belongs to.
+    pub bank: Option<String>,
+    /// State properties carried by this preset (state:state).
+    pub state: Vec<DefaultStateProperty>,
 }
 
 /// A live plugin instance with owned, connected port buffers.
@@ -3254,26 +3320,33 @@ impl Instance {
         }
     }
 
+    fn apply_preset_state(&mut self, state: &[DefaultStateProperty]) {
+        if state.is_empty() || self.state_iface.is_none() {
+            return;
+        }
+        let plugin_state = self.default_state_to_plugin_state(state);
+        let _ = self.restore_state(&plugin_state);
+    }
+
     /// Load a preset by index.
     pub fn load_preset(&mut self, index: usize) -> bool {
-        let Some(controls) = self.presets.get(index).map(|p| p.controls.clone()) else {
-            return false;
+        let (controls, state) = match self.presets.get(index) {
+            Some(p) => (p.controls.clone(), p.state.clone()),
+            None => return false,
         };
         self.apply_preset_controls(&controls);
+        self.apply_preset_state(&state);
         true
     }
 
     /// Load a preset by URI.
     pub fn load_preset_by_uri(&mut self, uri: &str) -> bool {
-        let Some(controls) = self
-            .presets
-            .iter()
-            .find(|p| p.uri == uri)
-            .map(|p| p.controls.clone())
-        else {
-            return false;
+        let (controls, state) = match self.presets.iter().find(|p| p.uri == uri) {
+            Some(p) => (p.controls.clone(), p.state.clone()),
+            None => return false,
         };
         self.apply_preset_controls(&controls);
+        self.apply_preset_state(&state);
         true
     }
 
@@ -3286,20 +3359,48 @@ impl Instance {
         for p in props {
             let key = self._urid.map(&p.key_uri);
             let (type_uri, bytes): (&str, Vec<u8>) = match p.datatype.as_deref() {
-                Some(uris::XSD_INTEGER) | Some(uris::XSD_INT) => {
-                    (uris::ATOM_INT, p.value.trim().parse::<i32>().unwrap_or(0).to_ne_bytes().to_vec())
-                }
-                Some(uris::XSD_LONG) => {
-                    (uris::ATOM_LONG, p.value.trim().parse::<i64>().unwrap_or(0).to_ne_bytes().to_vec())
-                }
-                Some(uris::XSD_FLOAT) => {
-                    (uris::ATOM_FLOAT, p.value.trim().parse::<f32>().unwrap_or(0.0).to_ne_bytes().to_vec())
-                }
-                Some(uris::XSD_DOUBLE) | Some(uris::XSD_DECIMAL) => {
-                    (uris::ATOM_DOUBLE, p.value.trim().parse::<f64>().unwrap_or(0.0).to_ne_bytes().to_vec())
-                }
+                Some(uris::XSD_INTEGER) | Some(uris::XSD_INT) => (
+                    uris::ATOM_INT,
+                    p.value
+                        .trim()
+                        .parse::<i32>()
+                        .unwrap_or(0)
+                        .to_ne_bytes()
+                        .to_vec(),
+                ),
+                Some(uris::XSD_LONG) => (
+                    uris::ATOM_LONG,
+                    p.value
+                        .trim()
+                        .parse::<i64>()
+                        .unwrap_or(0)
+                        .to_ne_bytes()
+                        .to_vec(),
+                ),
+                Some(uris::XSD_FLOAT) => (
+                    uris::ATOM_FLOAT,
+                    p.value
+                        .trim()
+                        .parse::<f32>()
+                        .unwrap_or(0.0)
+                        .to_ne_bytes()
+                        .to_vec(),
+                ),
+                Some(uris::XSD_DOUBLE) | Some(uris::XSD_DECIMAL) => (
+                    uris::ATOM_DOUBLE,
+                    p.value
+                        .trim()
+                        .parse::<f64>()
+                        .unwrap_or(0.0)
+                        .to_ne_bytes()
+                        .to_vec(),
+                ),
                 Some(uris::XSD_BOOLEAN) => {
-                    let v: i32 = if p.value.trim() == "true" || p.value.trim() == "1" { 1 } else { 0 };
+                    let v: i32 = if p.value.trim() == "true" || p.value.trim() == "1" {
+                        1
+                    } else {
+                        0
+                    };
                     (uris::ATOM_BOOL, v.to_ne_bytes().to_vec())
                 }
                 _ => {
@@ -3308,7 +3409,14 @@ impl Instance {
                     (uris::ATOM_STRING, b)
                 }
             };
-            st.insert(key, StateProperty { value: bytes, type_: self._urid.map(type_uri), flags: pod });
+            st.insert(
+                key,
+                StateProperty {
+                    value: bytes,
+                    type_: self._urid.map(type_uri),
+                    flags: pod,
+                },
+            );
         }
         st
     }
