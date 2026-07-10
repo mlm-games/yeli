@@ -2619,68 +2619,107 @@ impl Instance {
             });
         }
 
+        // Merge external atom input events into internal buffers so host-generated
+        // events (MIDI, patch, time) written via push_midi / patch_set / etc. are
+        // visible to the plugin. Collect port indices before consuming iterators.
+        let audio_input_indices = self.audio_input_indices.clone();
+        let audio_output_indices = self.audio_output_indices.clone();
+        let atom_input_indices = self.atom_input_indices.clone();
+        let atom_output_indices = self.atom_output_indices.clone();
+
+        let audio_inputs: Vec<&[f32]> = ports.audio_inputs.collect();
+        let mut audio_outputs: Vec<&mut [f32]> = ports.audio_outputs.collect();
+        let atom_inputs: Vec<&AtomSequence> = ports.atom_sequence_inputs.collect();
+        let mut atom_outputs: Vec<&mut AtomSequence> = ports.atom_sequence_outputs.collect();
+
+        if audio_inputs.len() != audio_input_indices.len() {
+            return Err(Error::PortCountMismatch {
+                expected: audio_input_indices.len(),
+                actual: audio_inputs.len(),
+            });
+        }
+        if audio_outputs.len() != audio_output_indices.len() {
+            return Err(Error::PortCountMismatch {
+                expected: audio_output_indices.len(),
+                actual: audio_outputs.len(),
+            });
+        }
+        if atom_inputs.len() != atom_input_indices.len() {
+            return Err(Error::PortCountMismatch {
+                expected: atom_input_indices.len(),
+                actual: atom_inputs.len(),
+            });
+        }
+        if atom_outputs.len() != atom_output_indices.len() {
+            return Err(Error::PortCountMismatch {
+                expected: atom_output_indices.len(),
+                actual: atom_outputs.len(),
+            });
+        }
+        for data in &audio_inputs {
+            if data.len() < samples {
+                return Err(Error::PortCountMismatch {
+                    expected: samples,
+                    actual: data.len(),
+                });
+            }
+        }
+        for data in &audio_outputs {
+            if data.len() < samples {
+                return Err(Error::PortCountMismatch {
+                    expected: samples,
+                    actual: data.len(),
+                });
+            }
+        }
+
+        // Copy external atom input events into internal buffers (merges with
+        // host-generated events already there).
+        for (seq_in, &port_index) in atom_inputs.iter().zip(atom_input_indices.iter()) {
+            let Some(buf_idx) = self
+                .ports
+                .iter()
+                .position(|p| p.index == port_index && p.direction == PortDirection::Input)
+            else {
+                continue;
+            };
+            let PortBuffer::AtomIn(dst) = &mut self.buffers[buf_idx] else {
+                continue;
+            };
+            for ev in seq_in.events() {
+                dst.push_event(ev.frames, ev.type_urid, ev.data)?;
+            }
+        }
+
+        self.inject_position_if_dirty();
+
         let connect = unsafe { (*self.descriptor).connect_port }
             .ok_or_else(|| Error::Instantiation("descriptor has no connect_port".into()))?;
 
-        // Validate and connect audio inputs.
-        if ports.audio_inputs.len() != self.audio_input_indices.len() {
-            return Err(Error::PortCountMismatch {
-                expected: self.audio_input_indices.len(),
-                actual: ports.audio_inputs.len(),
-            });
-        }
-        for (data, &index) in ports.audio_inputs.zip(self.audio_input_indices.iter()) {
-            if data.len() < samples {
-                return Err(Error::PortCountMismatch {
-                    expected: samples,
-                    actual: data.len(),
-                });
-            }
+        for (data, &index) in audio_inputs.iter().zip(audio_input_indices.iter()) {
             unsafe { connect(self.handle, index, data.as_ptr() as *mut c_void) };
         }
-
-        // Validate and connect audio outputs.
-        if ports.audio_outputs.len() != self.audio_output_indices.len() {
-            return Err(Error::PortCountMismatch {
-                expected: self.audio_output_indices.len(),
-                actual: ports.audio_outputs.len(),
-            });
-        }
-        for (data, &index) in ports.audio_outputs.zip(self.audio_output_indices.iter()) {
-            if data.len() < samples {
-                return Err(Error::PortCountMismatch {
-                    expected: samples,
-                    actual: data.len(),
-                });
-            }
+        for (data, &index) in audio_outputs.iter_mut().zip(audio_output_indices.iter()) {
             unsafe { connect(self.handle, index, data.as_mut_ptr() as *mut c_void) };
         }
 
-        // Validate and connect atom sequence inputs.
-        if ports.atom_sequence_inputs.len() != self.atom_input_indices.len() {
-            return Err(Error::PortCountMismatch {
-                expected: self.atom_input_indices.len(),
-                actual: ports.atom_sequence_inputs.len(),
-            });
-        }
-        for (seq, &index) in ports
-            .atom_sequence_inputs
-            .zip(self.atom_input_indices.iter())
-        {
-            unsafe { connect(self.handle, index, seq.as_ptr() as *mut c_void) };
+        // Connect internal atom input buffers (which have host + external events).
+        for &index in &atom_input_indices {
+            let Some(buf_idx) = self
+                .ports
+                .iter()
+                .position(|p| p.index == index && p.direction == PortDirection::Input)
+            else {
+                continue;
+            };
+            let PortBuffer::AtomIn(seq) = &mut self.buffers[buf_idx] else {
+                continue;
+            };
+            unsafe { connect(self.handle, index, seq.as_mut_ptr()) };
         }
 
-        // Validate, clear-as-chunk, and connect atom sequence outputs.
-        if ports.atom_sequence_outputs.len() != self.atom_output_indices.len() {
-            return Err(Error::PortCountMismatch {
-                expected: self.atom_output_indices.len(),
-                actual: ports.atom_sequence_outputs.len(),
-            });
-        }
-        for (seq, &index) in ports
-            .atom_sequence_outputs
-            .zip(self.atom_output_indices.iter())
-        {
+        // Connect external atom output buffers.
+        for (seq, &index) in atom_outputs.iter_mut().zip(atom_output_indices.iter()) {
             seq.clear_as_chunk();
             unsafe { connect(self.handle, index, seq.as_mut_ptr()) };
         }
@@ -2697,6 +2736,32 @@ impl Instance {
         unsafe { run(self.handle, samples as u32) };
         if let Some(ref worker) = self.worker_runtime {
             worker.end_run(self.handle);
+        }
+
+        for buf in &mut self.buffers {
+            if let PortBuffer::AtomIn(seq) = buf {
+                seq.clear();
+            }
+        }
+
+        self.reconnect_owned_ports()?;
+        Ok(())
+    }
+
+    /// Reconnect all port buffers back to the C plugin handle.
+    /// Called after run_with_ports to restore internal buffer ownership.
+    fn reconnect_owned_ports(&mut self) -> Result<(), Error> {
+        let connect = unsafe { (*self.descriptor).connect_port }
+            .ok_or_else(|| Error::Instantiation("descriptor has no connect_port".into()))?;
+
+        for (port, buf) in self.ports.iter().zip(self.buffers.iter_mut()) {
+            let ptr: *mut c_void = match buf {
+                PortBuffer::Control(v) => (&mut **v) as *mut f32 as *mut c_void,
+                PortBuffer::Audio(v) => v.as_mut_ptr() as *mut c_void,
+                PortBuffer::AtomIn(s) | PortBuffer::AtomOut(s) => s.as_mut_ptr(),
+                PortBuffer::Unconnected => std::ptr::null_mut(),
+            };
+            unsafe { connect(self.handle, port.index, ptr) };
         }
 
         Ok(())
