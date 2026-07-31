@@ -1,0 +1,31 @@
+name: Publish
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: "Version bump type"
+        required: true
+        default: "patch"
+        type: choice
+        options:
+          - none
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    uses: mlm-games/ci/.github/workflows/crate-publish.yml@main
+    with:
+      auto-bump: ${{ github.event_name == 'workflow_dispatch' && inputs.bump_type != 'none' }}
+      bump-type: ${{ inputs.bump_type }}
+      publish-crates-io: true
+      create-release: true
+    secrets:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
