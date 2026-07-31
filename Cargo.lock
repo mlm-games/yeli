@@ -43,9 +43,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "lv2-sys"
-version = "2.0.0"
-source = "git+https://github.com/mlm-games/rust-lv2#7256eb42048f787e07541c9c2fab58e31eba587b"
+name = "lv2_raw"
+version = "0.3.0"
+source = "git+https://github.com/mlm-games/lv2_raw#4e8cf5adce5afaffae4c836d333d0358bfc11bf0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "memchr"
@@ -249,7 +252,7 @@ dependencies = [
  "hound",
  "libc",
  "libloading",
- "lv2-sys",
+ "lv2_raw",
  "oxrdf",
  "oxttl",
 ]

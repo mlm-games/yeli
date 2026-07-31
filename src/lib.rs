@@ -2,7 +2,7 @@
 //!
 //! Components:
 //!   * `oxttl` + `oxrdf`   : Turtle parsing / RDF graph (bundle discovery)
-//!   * `lv2-sys`           : the LV2 C ABI (descriptor, features, URID, options)
+//!   * `lv2_raw::sys`       : the LV2 C ABI (descriptor, features, URID, options)
 //!   * `libloading`        : loading plugin shared objects
 //!
 //! Supported host features:
@@ -10,6 +10,8 @@
 //!   * http://lv2plug.in/ns/ext/urid#unmap
 //!   * http://lv2plug.in/ns/ext/options#options
 //!   * http://lv2plug.in/ns/ext/buf-size#boundedBlockLength
+
+use lv2_raw::sys as lv2_sys;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_void};
