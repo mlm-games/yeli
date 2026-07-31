@@ -16,4 +16,4 @@ libloading = "0.9"
 hound = "3.5"
 libc = "0.2"
 
-lv2_raw = { version = "0.3.2", features = ["sys"] }
+lv2_raw = { version = "0.3", features = ["sys"] }
